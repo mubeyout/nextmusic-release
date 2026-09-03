@@ -1,1 +1,6 @@
-{"versionName": "1.1.0", "versionCode": 73, "notes": "品牌焕新:玻璃 Mark+官方横幅 Banner\n修复:WebDAV 中文挂载/登录竞态/音效舒适度", "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.1.0/NextMusic-HD-1.1.0-universal.apk"}
+{
+  "versionName": "1.1.0",
+  "versionCode": 75,
+  "notes": "修复:遥控器失焦不可用(转场动画 TV 兼容)\n修复:域名连接自动回落网关\nFx/投屏页 TV 化",
+  "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.1.1/NextMusic-HD-1.1.0-vc75-universal.apk"
+}

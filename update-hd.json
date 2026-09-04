@@ -1,6 +1,6 @@
 {
   "versionName": "1.1.0",
-  "versionCode": 75,
-  "notes": "修复:遥控器失焦不可用(转场动画 TV 兼容)\n修复:域名连接自动回落网关\nFx/投屏页 TV 化",
-  "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.1.1/NextMusic-HD-1.1.0-vc75-universal.apk"
+  "versionCode": 76,
+  "notes": "品牌 v3 扁平化(新 mark/tv banner)\n修复:遥控器失焦不可用\n修复:域名连接自动回落网关",
+  "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.1.2/NextMusic-HD-1.1.0-vc76-universal.apk"
 }

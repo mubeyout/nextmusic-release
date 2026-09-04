@@ -1,6 +1,6 @@
 {
   "versionName": "1.1.0",
-  "versionCode": 95,
-  "notes": "修复:电视/本地域名连接自动回落网关(域名直连失败不再卡死)\n修复:投屏设备页偶发卡死\n桌面 1.1.1 同步",
-  "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.1.1/NextMusic-1.1.0-vc95-universal.apk"
+  "versionCode": 96,
+  "notes": "品牌 v3 扁平化(新 mark/图标)\n修复:域名连接自动回落网关\n修复:投屏设备页偶发卡死",
+  "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.1.2/NextMusic-1.1.0-vc96-universal.apk"
 }

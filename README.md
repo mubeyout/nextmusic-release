@@ -40,7 +40,7 @@
 
 | 域 | 能力 |
 |----|------|
-| 🎵 播放与曲库 | 本地音乐 · 歌单广场/榜单 · 全局搜索 · 播放队列 · 倍速/定时关闭 · 播客 · 音频可视化 |
+| 🎵 播放与曲库 | 本地音乐 · 歌单广场/榜单 · 全局搜索 · 播放队列 · 倍速/定时关闭 · 播客（长音频聚合） · 音频可视化 |
 | 🎚️ 音效 | 10 段 EQ · 流派预设 · 混响/音调/空间音效 · ViPER-lite 低音/细节/响度全链 |
 | 🔄 同步与备份 | 多端歌单/设置同步（局域网直连免费）· WebDAV/云同步（Pro）· 断点续播（Pro） |
 | 🖥️ 自托管服务器 | Web 管理台 · Web 播放器 · 多用户 · 服务器缓存下载 · 服务器端音源管理 |
@@ -111,6 +111,9 @@
 **用第三方音源合法吗？**
 NextMusic 是播放器与自托管服务器，不提供、不分发任何受版权保护的内容。自定义音源由用户自行配置并自负其责——请遵守你所在地区的法律法规。
 
+**和 LX Music 是什么关系？**
+NextMusic 是独立开发的音乐产品：客户端为独立代码库（React Native 自研），兼容 LX Music 同步协议与自定义音源脚本。NextMusic Server 基于 Apache-2.0 开源项目 lyswhut/lx-music-sync-server 与 XCQ0607/lxserver 构建增强（遵循 Apache-2.0 保留原始版权与许可），服务器端音源聚合引擎来自 LX 开源生态，管理台与 Web 播放器为 NextMusic 全新实现。官方不提供、不分发任何音乐内容。
+
 **没有 NAS / 服务器能用吗？**
 能。手机端本地播放完整可用；桌面版即将内置服务器，一台电脑就能当家音乐中枢。
 
@@ -129,16 +132,3 @@ NextMusic 是播放器与自托管服务器，不提供、不分发任何受版�
 ---
 
 NextMusic · 免费无广告，Pro ¥38 终身 · [☕ 爱发电](https://ifdian.net/a/nextmusic)
-
-
----
-
-# nextmusic-release
-`mubeyout/nextmusic` Docker 镜像的构建上下文仓库——**GitHub Actions 自动构建并推送 Docker Hub**。
-
-- 内容：`Dockerfile` + 分层改动声明 `NOTICE.md`（基座 lxserver, Apache-2.0）+ 构建产物（控制台 v3.x / 播放器 / 服务端树 / bcryptjs）
-- 每次发布：Kai 从生产容器净化导出最新产物 → 提交到本仓库 main → Actions 自动构建推送 `latest` + 日期 tag
-- 凭据：仓库 Secrets `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`（仅这两个，别的不需要）
-
-## 镜像使用
-见 [NextMusic/docker](https://github.com/mubeyout/NextMusic/tree/main/docker)（compose + 部署说明）。

@@ -15,8 +15,38 @@
 - **专业音效** —— 10 段 EQ + ViPER-lite 低音/细节/响度，全链真生效
 - **自托管音乐云** —— 服务器免费自建，歌缓存到自己的存储
 - **告别会员** —— 本地播放 + 自定义音源 + 自己的服务器，不用再为听歌交月租
+- **媒体库聚合** —— Emby / Jellyfin / Navidrome / Subsonic / WebDAV 直接挂载，家里现成的音乐资产全接进来
 
 还有：黑胶沉浸播放页、匿名可用不强制注册、深色统一视觉。
+
+## 📸 界面一览
+
+<p align="center">
+<table>
+<tr>
+<td align="center"><img src="assets/screens/player.png" width="260"><br><sub>黑胶沉浸播放页</sub></td>
+<td align="center"><img src="assets/screens/home.png" width="260"><br><sub>首页</sub></td>
+<td align="center"><img src="assets/screens/explore.png" width="260"><br><sub>探索 · 榜单广场</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="assets/screens/fx.png" width="260"><br><sub>均衡器与音效</sub></td>
+<td align="center"><img src="assets/screens/media-libraries.png" width="260"><br><sub>远程媒体库接入</sub></td>
+<td align="center"><img src="assets/screens/server.png" width="260"><br><sub>连接自托管服务器</sub></td>
+</tr>
+</table>
+</p>
+
+## 🧰 功能一览
+
+| 域 | 能力 |
+|----|------|
+| 🎵 播放与曲库 | 本地音乐 · 歌单广场/榜单 · 全局搜索 · 播放队列 · 倍速/定时关闭 · 播客 · 音频可视化 |
+| 🎚️ 音效 | 10 段 EQ · 流派预设 · 混响/音调/空间音效 · ViPER-lite 低音/细节/响度全链 |
+| 🔄 同步与备份 | 多端歌单/设置同步 · WebDAV 云备份 · 断点续播（Pro） |
+| 🖥️ 自托管服务器 | Web 管理台 · Web 播放器 · 多用户 · 服务器缓存下载 · 服务器端音源管理 |
+| 📚 媒体库聚合 | 本地 · Emby · Jellyfin · Navidrome · Subsonic · WebDAV，一处浏览 |
+| 🧩 更多 | 跨平台歌单导入 · 下载管理 · 主题外观 · 音频路由（蓝牙/客厅音响） · 代理设置 |
+
 
 ## 🏠 前台 + 后台，一套系统
 

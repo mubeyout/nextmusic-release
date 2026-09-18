@@ -24,7 +24,7 @@
 <table>
 <tr>
 <td width="474"><img src="assets/screens/tv-player.png" width="474" alt="TV 黑胶播放页"><br><sub><b>播放的仪式感</b> · TV 黑胶播放页</sub></td>
-<td width="474"><img src="assets/screens/desktop-web.png" width="474" alt="Web 播放器·探索页"><br><sub><b>桌面原生体验</b> · Web 播放器</sub></td>
+<td width="474"><img src="assets/screens/desktop-web.png" width="474" alt="Web 播放器·探索页"><br><sub><b>电脑上的音乐系统</b> · Web 播放器</sub></td>
 </tr>
 <tr>
 <td width="474"><img src="assets/screens/hd-media.png" width="474" alt="HD 媒体库封面网格"><br><sub><b>接入你的曲库</b> · HD 媒体库</sub></td>

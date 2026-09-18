@@ -1,6 +1,6 @@
 {
   "versionName": "1.3.0",
-  "versionCode": 155,
+  "versionCode": 156,
   "notes": "6 个第三方媒体库平台接入(道理鱼/飞牛/Songloft/Plex/Audiobookshelf/AudioStation)\n听风音乐深度接入:直连播放/收藏双向同步/官方图标\n歌曲行下载+收藏菜单、来源标签\n修复:听风歌误弹登录门槛;token 自动重登",
-  "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.3.0/NextMusic-phone-1.3.0-vc155-universal.apk"
+  "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.3.0/NextMusic-phone-1.3.0-vc156-universal.apk"
 }

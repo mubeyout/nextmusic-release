@@ -1,0 +1,3519 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.subsonicHandler = void 0;
+exports.getSubsonicMetaFilePath = getSubsonicMetaFilePath;
+exports.readSubsonicMeta = readSubsonicMeta;
+exports.writeSubsonicMeta = writeSubsonicMeta;
+exports.syncNativeLibraryToSubsonic = syncNativeLibraryToSubsonic;
+const crypto_1 = __importDefault(require("crypto"));
+const user_1 = require("../user");
+const userApi_1 = require("./userApi");
+const fileCache_1 = require("./fileCache");
+const singer_1 = require("./utils/singer");
+const recommendAlbums_1 = require("./utils/recommendAlbums");
+const coverProxy_1 = require("./coverProxy");
+const discovery_1 = require("./utils/discovery");
+const fs_1 = __importDefault(require("fs"));
+const path_1 = __importDefault(require("path"));
+// @ts-ignore
+const index_js_1 = __importDefault(require("../modules/utils/musicSdk/index.js"));
+const musicInfo_js_1 = __importDefault(require("../modules/utils/musicSdk/tx/musicInfo.js"));
+const musicInfo_js_2 = __importDefault(require("../modules/utils/musicSdk/wy/musicInfo.js"));
+const musicInfo_js_3 = require("../modules/utils/musicSdk/kg/musicInfo.js");
+const musicInfo_js_4 = require("../modules/utils/musicSdk/mg/musicInfo.js");
+const musicInfo_js_5 = __importDefault(require("../modules/utils/musicSdk/bd/musicInfo.js"));
+const musicSdk = index_js_1.default;
+// 推荐结果缓存：同一类型短时间内共享一次 QQ 抓取结果，避免客户端并发请求（启动瞬间
+// newest/recent/random 同时打来）重复访问。缓存成功后保留较长时间，并在 QQ 失败时
+// 回退到上次成功结果，确保刷新/限流时每日推荐不消失。
+const recommendCache = new Map();
+const RECOMMEND_CACHE_TTL = 60 * 60 * 1000;
+async function cachedRecommend(type, size) {
+    const key = `${type}:${size}`;
+    const cached = recommendCache.get(key);
+    const now = Date.now();
+    // 新鲜且非空的结果直接返回
+    if (cached && cached.data.length > 0 && now - cached.ts < RECOMMEND_CACHE_TTL) {
+        return cached.data;
+    }
+    // 抓取最新结果（内部已有重试）
+    const fresh = await (0, recommendAlbums_1.fetchRecommendedAlbums)(type, size).catch(() => []);
+    if (fresh.length > 0) {
+        recommendCache.set(key, { ts: now, data: fresh });
+        return fresh;
+    }
+    // 抓取失败：若有上次成功结果（即便已过期），回退返回，避免每日推荐空白
+    if (cached && cached.data.length > 0) {
+        console.warn(`[Subsonic] recommend(${type}) 刷新失败，回退到上次缓存的 ${cached.data.length} 条`);
+        return cached.data;
+    }
+    return [];
+}
+// 封面图片的缓存 / 并发限流 / 重试逻辑已抽到 @/server/coverProxy，
+// 由 handleGetCoverArt 通过 proxyCoverImage(res, url) 调用。
+// ─────────────────────────────────────────────
+// 图片字段提取助手（星标写回原生收藏时，从源头补齐歌手头像 / 专辑封面）
+// ─────────────────────────────────────────────
+/** 从歌手详情对象中提取头像地址，兼容各音源字段（wy/tx 均返回 avatar） */
+function extractArtistImage(info) {
+    if (!info || typeof info !== 'object')
+        return '';
+    return info.avatar || info.img || info.pic || info.picUrl || info.imageUrl || info.cover || info.coverUrl || '';
+}
+/** 从专辑歌曲列表返回中提取专辑封面（best-effort：取首曲 img），兼容各音源字段 */
+function extractAlbumImage(data) {
+    const first = data?.list?.[0];
+    const candidates = [first?.img, first?.meta?.img, data?.info?.img, data?.img, data?.pic, data?.cover, data?.coverUrl];
+    for (const v of candidates) {
+        if (typeof v === 'string' && v)
+            return v;
+    }
+    return '';
+}
+function normalizeSubsonicName(name) {
+    return (name || '').trim().toLowerCase();
+}
+function getSubsonicMetaFilePath(username) {
+    return path_1.default.join(global.lx.userPath, (0, user_1.getUserDirname)(username), 'subsonic-meta.json');
+}
+function readSubsonicMeta(username) {
+    try {
+        const filePath = getSubsonicMetaFilePath(username);
+        if (fs_1.default.existsSync(filePath)) {
+            const data = JSON.parse(fs_1.default.readFileSync(filePath, 'utf8'));
+            return {
+                starredAlbums: Array.isArray(data.starredAlbums) ? data.starredAlbums : [],
+                starredArtists: Array.isArray(data.starredArtists) ? data.starredArtists : [],
+                // 兼容旧版元数据：starredArtistNames 可能为 undefined
+                starredArtistNames: Array.isArray(data.starredArtistNames) ? data.starredArtistNames : [],
+                ratings: data.ratings && typeof data.ratings === 'object' ? data.ratings : {},
+            };
+        }
+    }
+    catch (e) {
+        console.error('[Subsonic] Failed to read subsonic-meta.json:', e);
+    }
+    return { starredAlbums: [], starredArtists: [], starredArtistNames: [], ratings: {} };
+}
+function writeSubsonicMeta(username, meta) {
+    try {
+        const filePath = getSubsonicMetaFilePath(username);
+        const dirPath = path_1.default.dirname(filePath);
+        if (!fs_1.default.existsSync(dirPath))
+            fs_1.default.mkdirSync(dirPath, { recursive: true });
+        fs_1.default.writeFileSync(filePath, JSON.stringify(meta), 'utf8');
+    }
+    catch (e) {
+        console.error('[Subsonic] Failed to write subsonic-meta.json:', e);
+    }
+}
+/**
+ * 反向同步：网页前端原生收藏(媒体库 artists/albums)变更 -> Subsonic 星标。
+ * added/removed 为原生条目 {id, source, name}。
+ */
+function syncNativeLibraryToSubsonic(username, type, added, removed) {
+    const meta = readSubsonicMeta(username);
+    const artistNames = new Set(meta.starredArtistNames);
+    if (type === 'artists') {
+        const set = new Set(meta.starredArtists);
+        for (const a of added) {
+            set.add(`art_${a.source}_${a.id}`);
+            if (a.name)
+                artistNames.add(normalizeSubsonicName(a.name));
+        }
+        for (const a of removed) {
+            set.delete(`art_${a.source}_${a.id}`);
+            if (a.name)
+                artistNames.delete(normalizeSubsonicName(a.name));
+        }
+        meta.starredArtists = Array.from(set);
+    }
+    else {
+        const set = new Set(meta.starredAlbums);
+        for (const a of added)
+            set.add(`alb_${a.source}_${a.id}`);
+        for (const a of removed)
+            set.delete(`alb_${a.source}_${a.id}`);
+        meta.starredAlbums = Array.from(set);
+    }
+    meta.starredArtistNames = Array.from(artistNames);
+    writeSubsonicMeta(username, meta);
+    console.log(`[Subsonic] 原生收藏(${type}) -> 星标 同步完成: +${added.length} / -${removed.length} (user=${username})`);
+}
+/**
+ * Subsonic 协议处理器
+ * 实现了 OpenSubsonic 核心 API 集成
+ *
+ * 序列化策略：
+ *  - JSON (f=json)：所有数据函数返回平铺的 JS 对象，sendResponse 直接 JSON.stringify
+ *  - XML (默认)：数据函数返回 {attrs, children} 嵌套结构，toXml 负责渲染
+ */
+class SubsonicHandler {
+    VERSION = '1.16.1';
+    SERVER_VERSION = '1.0.0';
+    // 预缓存歌曲 ID -> 封面 URL，避免 getCoverArt 重新请求 SDK
+    static MAX_SONG_PIC_CACHE = 5000;
+    songPicUrlCache = new Map();
+    // In-flight Promise 复用：避免客户端并发请求同一未缓存专辑封面时重复调用 SDK
+    albumSongFetchInFlight = new Map();
+    setSongPicUrl(id, url) {
+        if (this.songPicUrlCache.size >= SubsonicHandler.MAX_SONG_PIC_CACHE) {
+            const firstKey = this.songPicUrlCache.keys().next().value;
+            if (firstKey)
+                this.songPicUrlCache.delete(firstKey);
+        }
+        this.songPicUrlCache.set(id, url);
+    }
+    // 在线全网搜索歌曲缓存 (ID -> MusicInfo)，确保后续 getSong / getCoverArt / getLyrics 能精准查到歌曲元数据
+    onlineSongCache = new Map();
+    // [修复] onlineSongCache 真正落盘持久化：之前只是内存 Map，重启即丢，导致 kw 等回源结果无法复用
+    onlineSongCacheLoaded = false;
+    // Subsonic 播放缓存后台任务跟踪：username -> { songKey, controller }，用于切歌时自动取消上一首未完成的下载
+    subsonicActiveTasks = new Map();
+    // 固定同一关键词的在线结果顺序，避免客户端翻页时出现重复或跳项。
+    onlineSearchCache = new Map();
+    // 当前用户 love 列表歌曲 id 集合缓存，用于歌曲序列化时标记 starred（按用户名隔离，避免并发串号）
+    loveIdSets = new Map();
+    currentUsername = '';
+    getOnlineSongCachePath() {
+        return path_1.default.join(global.lx.dataPath, 'subsonic-online-cache.json');
+    }
+    // [日志] 音源(在线回源)类错误统一写独立文件，控制台只打精简一行
+    getSourceErrorLogPath() {
+        return path_1.default.join(global.lx.dataPath, 'subsonic-source-errors.log');
+    }
+    logSourceError(tag, detail, err) {
+        const ts = new Date().toISOString();
+        const errMsg = err?.message ?? String(err ?? '');
+        const errStack = err?.stack ?? '';
+        const block = `[${ts}] [${tag}] ${detail}\n  message: ${errMsg}\n${errStack ? `  stack: ${errStack}\n` : ''}---\n`;
+        try {
+            fs_1.default.appendFileSync(this.getSourceErrorLogPath(), block);
+        }
+        catch { /* 写错误日志失败不阻塞主流程 */ }
+        // 控制台精简显示
+        console.warn(`[Subsonic] 音源错误 ${tag}: ${detail} (详见 subsonic-source-errors.log)`);
+    }
+    loadOnlineSongCache() {
+        if (this.onlineSongCacheLoaded)
+            return;
+        this.onlineSongCacheLoaded = true;
+        try {
+            const p = this.getOnlineSongCachePath();
+            if (fs_1.default.existsSync(p)) {
+                const arr = JSON.parse(fs_1.default.readFileSync(p, 'utf8'));
+                if (Array.isArray(arr)) {
+                    for (const m of arr)
+                        if (m && m.id)
+                            this.onlineSongCache.set(m.id, m);
+                    console.log(`[Subsonic] onlineSongCache 已从磁盘加载 ${this.onlineSongCache.size} 条`);
+                }
+            }
+        }
+        catch (e) {
+            console.error('[Subsonic] 加载 onlineSongCache 失败:', e);
+        }
+    }
+    saveOnlineSongCacheTimer = null;
+    // 磁盘持久化：使用 1 秒防抖批量落盘，避免搜索/加载大专辑时并发重复写盘
+    // 采用「临时文件 + rename」做原子写：避免进程在写入中途被强杀导致文件损坏
+    saveOnlineSongCache() {
+        if (this.saveOnlineSongCacheTimer)
+            return;
+        this.saveOnlineSongCacheTimer = setTimeout(() => {
+            this.saveOnlineSongCacheTimer = null;
+            try {
+                const p = this.getOnlineSongCachePath();
+                const dir = path_1.default.dirname(p);
+                if (!fs_1.default.existsSync(dir))
+                    fs_1.default.mkdirSync(dir, { recursive: true });
+                const arr = Array.from(this.onlineSongCache.values());
+                const tmp = `${p}.${process.pid}.tmp`;
+                fs_1.default.writeFileSync(tmp, JSON.stringify(arr), 'utf8');
+                fs_1.default.renameSync(tmp, p);
+            }
+            catch (e) {
+                console.error('[Subsonic] 保存 onlineSongCache 失败:', e);
+            }
+        }, 1000);
+    }
+    cacheOnlineSong(music) {
+        if (!music || !music.id)
+            return;
+        this.loadOnlineSongCache();
+        if (this.onlineSongCache.size > 5000) {
+            const firstKey = this.onlineSongCache.keys().next().value;
+            if (firstKey)
+                this.onlineSongCache.delete(firstKey);
+        }
+        this.onlineSongCache.set(music.id, music);
+        this.saveOnlineSongCache();
+    }
+    // ─────────────────────────────────────────────
+    // 鉴权
+    // ─────────────────────────────────────────────
+    verifyAuth(params) {
+        const u = params.get('u');
+        if (!u)
+            return null;
+        const user = global.lx.config.users.find((user) => user.name === u);
+        if (!user)
+            return null;
+        // Token & Salt 方式 (推荐)
+        const t = params.get('t');
+        const s = params.get('s');
+        if (t && s) {
+            const hash = crypto_1.default.createHash('md5').update(user.password + s).digest('hex');
+            if (hash === t.toLowerCase())
+                return u;
+        }
+        // 明文密码方式 (包含 enc: 前缀处理)
+        const p = params.get('p');
+        if (p) {
+            let password = p;
+            if (p.startsWith('enc:')) {
+                password = Buffer.from(p.substring(4), 'hex').toString();
+            }
+            if (password === user.password)
+                return u;
+        }
+        return null;
+    }
+    // ─────────────────────────────────────────────
+    // 响应序列化
+    // ─────────────────────────────────────────────
+    /**
+     * 发送 Subsonic 成功响应
+     * @param res    HTTP 响应
+     * @param data   JSON 模式：平铺的 JS 对象；XML 模式：带 attrs/children 结构的对象
+     * @param format 'json' | null/其他
+     */
+    sendResponse(res, data, format) {
+        const base = {
+            status: 'ok',
+            version: this.VERSION,
+            type: 'lxserver',
+            serverVersion: this.SERVER_VERSION,
+            openSubsonic: true,
+        };
+        if (format === 'json') {
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(JSON.stringify({ 'subsonic-response': { ...base, ...data } }));
+        }
+        else {
+            res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+            let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+            xml += `<subsonic-response xmlns="http://subsonic.org/restapi"`;
+            xml += ` status="${base.status}" version="${base.version}"`;
+            xml += ` type="${base.type}" serverVersion="${base.serverVersion}" openSubsonic="true">\n`;
+            xml += this.toXml(data);
+            xml += '</subsonic-response>';
+            res.end(xml);
+        }
+    }
+    /** XML 渲染（仅 XML 路径使用）*/
+    toXml(obj, indent = '  ') {
+        let xml = '';
+        for (const key in obj) {
+            const val = obj[key];
+            if (Array.isArray(val)) {
+                for (const item of val) {
+                    if (!item)
+                        continue;
+                    xml += `${indent}<${key}${this.renderAttrs(item.attrs)}`;
+                    if (item.children) {
+                        if (typeof item.children === 'string') {
+                            xml += `>${this.escapeXml(item.children)}</${key}>\n`;
+                        }
+                        else {
+                            xml += '>\n' + this.toXml(item.children, indent + '  ') + `${indent}</${key}>\n`;
+                        }
+                    }
+                    else {
+                        xml += ' />\n';
+                    }
+                }
+            }
+            else if (typeof val === 'object' && val !== null) {
+                xml += `${indent}<${key}${this.renderAttrs(val.attrs)}`;
+                if (val.children) {
+                    if (typeof val.children === 'string') {
+                        xml += `>${this.escapeXml(val.children)}</${key}>\n`;
+                    }
+                    else {
+                        xml += '>\n' + this.toXml(val.children, indent + '  ') + `${indent}</${key}>\n`;
+                    }
+                }
+                else {
+                    xml += ' />\n';
+                }
+            }
+        }
+        return xml;
+    }
+    renderAttrs(attrs) {
+        if (!attrs)
+            return '';
+        let str = '';
+        for (const k in attrs) {
+            const v = String(attrs[k])
+                .replace(/&/g, '&amp;')
+                .replace(/"/g, '&quot;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            str += ` ${k}="${v}"`;
+        }
+        return str;
+    }
+    sendError(res, code, message, format) {
+        if (format === 'json') {
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(JSON.stringify({
+                'subsonic-response': {
+                    status: 'failed',
+                    version: this.VERSION,
+                    type: 'lxserver',
+                    serverVersion: this.SERVER_VERSION,
+                    openSubsonic: true,
+                    error: { code, message },
+                },
+            }));
+        }
+        else {
+            res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+            res.end(`<?xml version="1.0" encoding="UTF-8"?>\n` +
+                `<subsonic-response xmlns="http://subsonic.org/restapi" status="failed" version="${this.VERSION}"` +
+                ` type="lxserver" serverVersion="${this.SERVER_VERSION}" openSubsonic="true">` +
+                `<error code="${code}" message="${this.escapeXml(message)}"/></subsonic-response>`);
+        }
+    }
+    escapeXml(str) {
+        return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    // ─────────────────────────────────────────────
+    // 路由分发
+    // ─────────────────────────────────────────────
+    async handleRequest(req, res, urlObj) {
+        let params = urlObj.searchParams;
+        // [修复] 处理 POST 请求体中的参数 (如 Feishin 客户端)
+        if (req.method === 'POST') {
+            try {
+                const bodyParams = await new Promise((resolve) => {
+                    let body = '';
+                    req.on('data', chunk => { body += chunk; });
+                    req.on('end', () => {
+                        resolve(new URLSearchParams(body));
+                    });
+                });
+                // 合并 URL 参数和 Body 参数
+                const mergedParams = new URLSearchParams(params.toString());
+                for (const key of new Set(bodyParams.keys())) {
+                    if (mergedParams.has(key))
+                        continue;
+                    for (const value of bodyParams.getAll(key))
+                        mergedParams.append(key, value);
+                }
+                params = mergedParams;
+            }
+            catch (e) {
+                console.error('[Subsonic] POST body parse error:', e);
+            }
+        }
+        const format = params.get('f') === 'json' ? 'json' : 'xml';
+        const username = this.verifyAuth(params);
+        if (!username) {
+            return this.sendError(res, 40, 'Wrong username or password', format);
+        }
+        this.currentUsername = username;
+        const { pathname } = urlObj;
+        const method = pathname.split('/').pop()?.split('.')[0] || '';
+        // [starred] 预先计算当前用户 love 列表歌曲 id 集合，供歌曲序列化标记 starred（排除热路径方法）
+        if (!['ping', 'getLicense', 'stream', 'download', 'getCoverArt'].includes(method)) {
+            try {
+                const listData = await (0, user_1.getUserSpace)(username).listManage.getListData();
+                this.loveIdSets.set(username, new Set((listData.loveList || []).map((m) => m.id)));
+            }
+            catch (e) {
+                console.error('[Subsonic] 计算 love 列表失败:', e);
+            }
+        }
+        const logId = params.get('id');
+        const logQuery = params.get('query');
+        const logArtist = params.get('artist');
+        const logTitle = params.get('title');
+        let logDetails = `user=${username}`;
+        if (logId)
+            logDetails += ` id=${logId}`;
+        if (logQuery)
+            logDetails += ` query="${logQuery}"`;
+        if (logArtist)
+            logDetails += ` artist="${logArtist}"`;
+        if (logTitle)
+            logDetails += ` title="${logTitle}"`;
+        if (global.lx.config['subsonic.enableDebug']) {
+            console.log(`[Subsonic Debug] ${req.method} /${method} (${format}) ${logDetails}`);
+        }
+        try {
+            switch (method) {
+                case 'ping':
+                    return this.sendResponse(res, {}, format);
+                case 'getLicense':
+                    return this.handleGetLicense(res, format);
+                case 'getPlaylists':
+                    return this.handleGetPlaylists(res, username, format);
+                case 'getPlaylist':
+                    return this.handleGetPlaylist(res, username, params, format);
+                case 'getAlbum':
+                    return this.handleGetAlbum(res, username, params, format);
+                case 'getSong':
+                    return this.handleGetSong(res, username, params, format);
+                case 'stream':
+                case 'download':
+                    return this.handleStream(req, res, username, params, format);
+                case 'getCoverArt':
+                    return this.handleGetCoverArt(req, res, username, params, format);
+                case 'getUser':
+                    return this.handleGetUser(res, username, params, format);
+                case 'getMusicFolders':
+                    return this.handleGetMusicFolders(res, format);
+                case 'getMusicDirectory':
+                    return this.handleGetMusicDirectory(res, username, params, format);
+                case 'getGenres':
+                    return this.handleGetGenres(res, username, format);
+                case 'getInternetRadioStations':
+                    return this.handleGetInternetRadioStations(res, format);
+                case 'getAlbumList':
+                    return this.handleGetAlbumList(res, username, params, format, false);
+                case 'getAlbumList2':
+                    return this.handleGetAlbumList(res, username, params, format, true);
+                case 'getLyrics':
+                    return this.handleGetLyrics(res, username, params, format);
+                case 'getLyricsBySongId':
+                    return this.handleGetLyricsBySongId(res, username, params, format);
+                case 'getOpenSubsonicExtensions':
+                    return this.handleGetOpenSubsonicExtensions(res, format);
+                case 'getArtistInfo':
+                case 'getArtistInfo2':
+                    return this.handleGetArtistInfo(res, username, params, format);
+                case 'getArtist':
+                    return this.handleGetArtist(res, username, params, format);
+                case 'getArtistList':
+                case 'getArtists':
+                    return this.handleGetArtists(res, username, format);
+                case 'search':
+                case 'search2':
+                case 'search3':
+                    return this.handleSearch(res, username, params, format, method);
+                case 'getStarred':
+                    return this.handleGetStarred(res, username, format, false);
+                case 'getStarred2':
+                    return this.handleGetStarred(res, username, format, true);
+                case 'star':
+                    return this.handleStar(res, username, params, format, true);
+                case 'unstar':
+                    return this.handleStar(res, username, params, format, false);
+                case 'getRandomSongs':
+                case 'getSongsByGenre':
+                case 'getSongsByGenre2':
+                    return this.handleGetRandomSongs(res, username, params, format);
+                case 'getSimilarSongs':
+                case 'getSimilarSongs2':
+                    return this.handleGetSimilarSongs(res, username, params, format);
+                case 'getTopSongs':
+                    return this.handleGetTopSongs(res, username, params, format);
+                case 'updatePlaylist':
+                    return this.handleUpdatePlaylist(res, username, params, format);
+                case 'createPlaylist':
+                    return this.handleCreatePlaylist(res, username, params, format);
+                case 'deletePlaylist':
+                    return this.handleDeletePlaylist(res, username, params, format);
+                case 'scrobble':
+                    return this.sendResponse(res, {}, format);
+                case 'getNowPlaying':
+                    return this.sendResponse(res, { nowPlaying: { entry: [] } }, format);
+                case 'getScanStatus':
+                    return this.sendResponse(res, format === 'json'
+                        ? { scanStatus: { scanning: false, count: 0 } }
+                        : { scanStatus: { attrs: { scanning: false, count: 0 } } }, format);
+                default:
+                    if (global.lx.config['subsonic.enableDebug']) {
+                        console.warn(`[Subsonic Debug ⚠️ 未实现的接口] ${req.method} /${method} (${format}) ${logDetails}`);
+                    }
+                    return this.sendError(res, 0, 'Method not found: ' + method, format);
+            }
+        }
+        catch (err) {
+            console.error('[Subsonic] Error:', err);
+            return this.sendError(res, 0, err.message || 'Internal server error', format);
+        }
+    }
+    // ─────────────────────────────────────────────
+    // 帮助函数
+    // ─────────────────────────────────────────────
+    async getLibraryData(username, type) {
+        const userDir = path_1.default.join(global.lx.userPath, (0, user_1.getUserDirname)(username));
+        const libPath = path_1.default.join(userDir, 'library', `${type}.json`);
+        if (!fs_1.default.existsSync(libPath))
+            return [];
+        try {
+            const content = await fs_1.default.promises.readFile(libPath, 'utf8');
+            return JSON.parse(content);
+        }
+        catch (e) {
+            console.error(`[Subsonic] Error reading library ${type}:`, e);
+            return [];
+        }
+    }
+    /** 写回原生媒体库收藏文件（artists.json / albums.json），用于双向同步 */
+    async writeLibraryData(username, type, data) {
+        const userDir = path_1.default.join(global.lx.userPath, (0, user_1.getUserDirname)(username));
+        const libPath = path_1.default.join(userDir, 'library', `${type}.json`);
+        const dir = path_1.default.dirname(libPath);
+        if (!fs_1.default.existsSync(dir))
+            fs_1.default.mkdirSync(dir, { recursive: true });
+        fs_1.default.writeFileSync(libPath, JSON.stringify(data, null, 2), 'utf8');
+    }
+    /** 解析专辑信息（Subsonic 星标写回原生收藏时填充名称与封面；失败返回 name:null 不阻断星标） */
+    async resolveAlbumInfo(source, realId) {
+        try {
+            const sdk = musicSdk[source];
+            if (sdk?.extendDetail?.getAlbumSongs) {
+                const data = await sdk.extendDetail.getAlbumSongs(realId);
+                const name = data?.name || data?.list?.[0]?.albumName || data?.list?.[0]?.meta?.albumName || null;
+                const picUrl = extractAlbumImage(data);
+                return { name, picUrl };
+            }
+        }
+        catch { /* 解析失败不阻断主流程 */ }
+        return { name: null, picUrl: '' };
+    }
+    /** 星标写回原生收藏时取歌手头像；失败返回 '' 不阻断星标 */
+    async resolveArtistPicUrl(source, realId) {
+        try {
+            const sdk = musicSdk[source];
+            if (sdk?.extendDetail?.getArtistDetail) {
+                const info = await sdk.extendDetail.getArtistDetail(realId);
+                return extractArtistImage(info);
+            }
+        }
+        catch { /* 取图失败不阻断主流程 */ }
+        return '';
+    }
+    parseDuration(interval) {
+        if (!interval)
+            return 0;
+        if (typeof interval === 'number')
+            return interval;
+        if (typeof interval === 'string') {
+            if (interval.includes(':')) {
+                const parts = interval.split(':');
+                if (parts.length === 2)
+                    return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+                if (parts.length === 3)
+                    return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
+            }
+            return parseInt(interval) || 0;
+        }
+        return 0;
+    }
+    /**
+     * 将 MusicInfo 映射为 Subsonic child/song 的平铺 JS 对象（适用于 JSON 响应）
+     */
+    musicToSongFlat(music, parentId, artistIdOverride, username) {
+        const meta = music.meta || {};
+        const id = music.id;
+        const singer = music.singer || 'Unknown Artist';
+        const source = music.source;
+        // [优化] 深度提取专辑信息：兼容 SDK 原始对象结构
+        const albumName = meta.albumName || music.albumName || music.album?.name || 'Unknown Album';
+        // 针对 tx 平台优先使用 albumMid (00...) 构造 alb_ ID，因为封面构造依赖它
+        const rawAlbumId = music.albumMid || music.album?.mid || meta.albumId || music.albumId || music.album?.id;
+        // [修复] 规范化 albumId：优先使用提取到的专辑 ID，只有完全没有时才回退到 parentId
+        // 且如果 parentId 是歌手 ID，在有 rawAlbumId 的情况下绝不使用它
+        const albumId = rawAlbumId ? `alb_${source}_${rawAlbumId}` : parentId;
+        // [修复] 提取图片 URL：兼容更多 SDK 字段名
+        const picUrl = meta.picUrl || music.pic || music.img || music.albumPicUrl || music.album?.picUrl || null;
+        if (picUrl && typeof picUrl === 'string' && picUrl.startsWith('http')) {
+            // [双向缓存] 同时缓存给歌曲 ID 和专辑 ID
+            this.setSongPicUrl(id, picUrl);
+            if (rawAlbumId)
+                this.setSongPicUrl(`alb_${source}_${rawAlbumId}`, picUrl);
+        }
+        // [修复] 处理 Genre 发现逻辑
+        let genreMatch = music.genre || '';
+        if (parentId.startsWith('genre_')) {
+            genreMatch = parentId.replace('genre_', '');
+        }
+        // [关键修复] 歌手 ID 生成策略优化
+        // 1. 如果指定了覆盖 ID（如在歌手详情页），优先使用
+        // 2. 否则优先使用 singerId 字段构造规范 ID
+        // 3. 兜底使用第一位歌手名构造 ID，避免多歌手符号（如 、）在大 ID 中导致客户端解析失败
+        const primarySinger = (singer.split('、')[0] || 'Unknown Artist').trim();
+        const defaultArtistId = music.singerId ? `art_${source}_${music.singerId}` : `artist_${primarySinger}`;
+        const finalArtistId = artistIdOverride || defaultArtistId;
+        const starred = (username && this.loveIdSets.get(username)?.has(id)) ? new Date().toISOString() : undefined;
+        return {
+            id,
+            parent: parentId,
+            title: music.name,
+            name: music.name,
+            album: albumName,
+            albumId: String(albumId),
+            artist: singer,
+            artistId: finalArtistId,
+            track: music.track || 0,
+            year: music.year || 0,
+            genre: genreMatch,
+            coverArt: (picUrl && typeof picUrl === 'string' && picUrl.startsWith('http')) ? picUrl : albumId,
+            duration: this.parseDuration(music.interval),
+            ...this.getBestQualityMeta(music),
+            ...(starred ? { starred } : {}),
+            isVideo: false,
+            isDir: false,
+            // 某些客户端 (如 Feishin) 在特定视图下不喜欢非标准字段，可以保留但确保标准字段优先
+            type: 'music',
+        };
+    }
+    /**
+     * 从歌曲元数据中检测并提取最佳音质配置
+     */
+    getBestQualityMeta(music) {
+        const meta = music.meta || {};
+        const qualitys = music.types || music._types || meta.qualitys || meta.types || meta._types || music._qualitys || meta._qualitys || [];
+        const qMap = {
+            'master': { bitRate: 2304, suffix: 'Master', contentType: 'audio/flac' },
+            'atmos_plus': { bitRate: 1500, suffix: 'Atmos+', contentType: 'audio/mp4' },
+            'atmos': { bitRate: 1000, suffix: 'Atmos', contentType: 'audio/mp4' },
+            'hires': { bitRate: 2304, suffix: 'Hi-Res', contentType: 'audio/flac' },
+            'flac24bit': { bitRate: 2304, suffix: 'Hi-Res', contentType: 'audio/flac' },
+            'flac': { bitRate: 999, suffix: '无损', contentType: 'audio/flac' },
+            '320k': { bitRate: 320, suffix: '320k', contentType: 'audio/mpeg' },
+            '192k': { bitRate: 192, suffix: '192k', contentType: 'audio/mpeg' },
+            '128k': { bitRate: 128, suffix: '128k', contentType: 'audio/mpeg' },
+        };
+        const hasQuality = (q) => {
+            if (Array.isArray(qualitys)) {
+                return qualitys.some((item) => item === q || item?.type === q || item?.name === q);
+            }
+            else if (qualitys && typeof qualitys === 'object') {
+                return Boolean(qualitys[q]);
+            }
+            return false;
+        };
+        // 尝试按优先级匹配最佳音质
+        for (const q of ['master', 'atmos_plus', 'atmos', 'hires', 'flac24bit', 'flac', '320k', '192k', '128k']) {
+            if (hasQuality(q)) {
+                return { ...qMap[q], size: 0 };
+            }
+        }
+        // 若是在线全网检索歌曲，没抓到 types 信息的兜底返回 320k
+        if (music.id && music.id.includes('_')) {
+            return { bitRate: 320, size: 0, suffix: '320k', contentType: 'audio/mpeg' };
+        }
+        // 兜底返回 128k
+        return { bitRate: 128, size: 0, suffix: '128k', contentType: 'audio/mpeg' };
+    }
+    /**
+     * 将 MusicInfo 映射为 XML 渲染格式 {attrs, children?}
+     */
+    musicToSongXml(music, parentId, artistIdOverride, username) {
+        return { attrs: this.musicToSongFlat(music, parentId, artistIdOverride, username) };
+    }
+    /** 查找某个用户下所有列表中的某首歌 */
+    async findMusicById(username, id) {
+        // [修复] 读取前确保磁盘上的 onlineSongCache 已加载（之前只在 cacheOnlineSong 写入时触发，
+        // 导致重启后首次读取发生在任何写入之前，落盘数据永远读不进来 -> 重启即丢）
+        this.loadOnlineSongCache();
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        let music = listData.loveList.find((m) => m.id === id);
+        if (music)
+            return { music, listId: 'love' };
+        music = listData.defaultList.find((m) => m.id === id);
+        if (music)
+            return { music, listId: 'default' };
+        for (const listInfo of listData.userList) {
+            const list = listInfo.list;
+            music = list.find((m) => m.id === id);
+            if (music)
+                return { music, listId: listInfo.id };
+        }
+        // 检查本地专辑库
+        try {
+            const libAlbums = await this.getLibraryData(username, 'albums');
+            for (const alb of libAlbums) {
+                const source = alb.source || 'wy';
+                for (const s of (alb.list || [])) {
+                    const songId = `${source}_${s.songmid || s.songId}`;
+                    if (songId === id) {
+                        return {
+                            music: {
+                                id: songId,
+                                name: s.name,
+                                singer: s.singer,
+                                source: source,
+                                songmid: s.songmid,
+                                interval: s.interval || '0',
+                                img: s.img,
+                                meta: {
+                                    picUrl: s.img,
+                                    albumName: s.albumName || alb.name,
+                                    albumId: s.albumMid || alb.id,
+                                },
+                            },
+                            listId: `alb_${source}_${alb.id}`,
+                        };
+                    }
+                }
+            }
+        }
+        catch (e) { }
+        // 检查在线搜索缓存
+        if (this.onlineSongCache.has(id)) {
+            return { music: this.onlineSongCache.get(id), listId: 'online' };
+        }
+        return null;
+    }
+    getListParams(params, name) {
+        return params.getAll(name)
+            .flatMap(value => value.split(','))
+            .map(value => value.trim())
+            .filter(Boolean);
+    }
+    async resolveMusicIds(username, ids) {
+        const musics = [];
+        for (const id of ids) {
+            const result = await this.findMusicById(username, id);
+            if (!result)
+                return null;
+            musics.push(result.music);
+        }
+        return musics;
+    }
+    // ─────────────────────────────────────────────
+    // 端点实现
+    // ─────────────────────────────────────────────
+    handleGetLicense(res, format) {
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                license: { valid: true, email: 'lxserver@lxmusic.com', licenseExpires: '2099-12-31T00:00:00.000Z' },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            license: { attrs: { valid: true, email: 'lxserver@lxmusic.com', licenseExpires: '2099-12-31T00:00:00.000Z' } },
+        }, format);
+    }
+    handleGetMusicFolders(res, format) {
+        const folders = [
+            { id: '1', name: 'LX Music（按服务器设置）' },
+            { id: 'local', name: '本地曲库' },
+            { id: 'all', name: '全部在线平台' },
+            { id: 'wy', name: '网易云音乐' },
+            { id: 'tx', name: 'QQ 音乐' },
+            { id: 'kw', name: '酷我音乐' },
+            { id: 'kg', name: '酷狗音乐' },
+            { id: 'mg', name: '咪咕音乐' },
+        ];
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                musicFolders: { musicFolder: folders },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            musicFolders: { children: { musicFolder: folders.map(folder => ({ attrs: folder })) } },
+        }, format);
+    }
+    async handleGetPlaylists(res, username, format) {
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        // console.log(`[Subsonic] handleGetPlaylists for ${username}: default=${listData.defaultList.length}, love=${listData.loveList.length}, userLists=${listData.userList.length}`)
+        const buildPlaylist = (id, name, musics, created, coverArt) => ({
+            id,
+            name,
+            comment: '',
+            owner: username,
+            public: false,
+            songCount: musics.length,
+            duration: musics.reduce((sum, m) => sum + this.parseDuration(m.interval), 0),
+            created: created || new Date().toISOString(),
+            changed: created || new Date().toISOString(),
+            coverArt: coverArt || id,
+        });
+        const playlists = [];
+        if (listData.defaultList.length > 0) {
+            const musics = listData.defaultList;
+            const coverArt = musics[0]?.meta?.picUrl || musics[0]?.img || 'logo';
+            playlists.push(buildPlaylist('default', '默认列表', musics, undefined, coverArt));
+        }
+        {
+            const musics = listData.loveList;
+            const coverArt = musics[0]?.meta?.picUrl || musics[0]?.img || 'logo';
+            playlists.push(buildPlaylist('love', '我的收藏', musics, undefined, coverArt));
+        }
+        for (const list of listData.userList) {
+            const musics = (list.list || []);
+            const coverArt = list.Album || list.picUrl || musics[0]?.meta?.picUrl || musics[0]?.img || 'logo';
+            playlists.push(buildPlaylist(list.id, list.name, musics, list.locationUpdateTime ? new Date(list.locationUpdateTime).toISOString() : undefined, coverArt));
+        }
+        // [新增] 排行榜(榜单)作为只读虚拟播放列表暴露
+        // 仅在配置开启 subsonic.publicLeaderboards 时生效
+        if (global.lx.config['subsonic.publicLeaderboards']) {
+            try {
+                const lbPlaylists = await this.getLeaderboardPlaylists();
+                playlists.push(...lbPlaylists);
+            }
+            catch (err) {
+                console.error('[Subsonic] Append leaderboard playlists failed:', err);
+            }
+        }
+        if (format === 'json') {
+            return this.sendResponse(res, { playlists: { playlist: playlists } }, format);
+        }
+        return this.sendResponse(res, {
+            playlists: { children: { playlist: playlists.map(p => ({ attrs: p })) } },
+        }, format);
+    }
+    async handleGetPlaylist(res, username, params, format) {
+        const id = params.get('id');
+        if (!id)
+            return this.sendError(res, 10, 'Required parameter is missing: id', format);
+        // [新增] 排行榜(榜单)虚拟只读播放列表
+        if (id.startsWith('lb_')) {
+            return this.handleGetLeaderboardPlaylist(res, username, id, format);
+        }
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        let musics = [];
+        let listName = 'Unknown';
+        let coverArt = 'logo';
+        if (id === 'love') {
+            musics = listData.loveList;
+            listName = '我的收藏';
+            coverArt = musics[0]?.meta?.picUrl || musics[0]?.img || 'logo';
+        }
+        else if (id === 'default') {
+            musics = listData.defaultList;
+            listName = '默认列表';
+            coverArt = musics[0]?.meta?.picUrl || musics[0]?.img || 'logo';
+        }
+        else {
+            const list = listData.userList.find((l) => l.id === id);
+            if (list) {
+                listName = list.name;
+                musics = (list.list || []);
+                coverArt = list.Album || list.picUrl || musics[0]?.meta?.picUrl || musics[0]?.img || 'logo';
+            }
+        }
+        const playlistMeta = {
+            id,
+            name: listName,
+            comment: '',
+            owner: username,
+            public: false,
+            songCount: musics.length,
+            duration: musics.reduce((sum, m) => sum + this.parseDuration(m.interval), 0),
+            created: new Date().toISOString(),
+            changed: new Date().toISOString(),
+            coverArt,
+        };
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                playlist: {
+                    ...playlistMeta,
+                    entry: musics.map((m) => this.musicToSongFlat(m, id, undefined, username)),
+                },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            playlist: {
+                attrs: playlistMeta,
+                children: {
+                    entry: musics.map((m) => this.musicToSongXml(m, id, undefined, username)),
+                },
+            },
+        }, format);
+    }
+    async handleUpdatePlaylist(res, username, params, format) {
+        const playlistId = params.get('playlistId');
+        if (!playlistId)
+            return this.sendError(res, 10, 'Required parameter is missing: playlistId', format);
+        if (playlistId.startsWith('lb_'))
+            return this.sendError(res, 0, '排行榜为只读播放列表，不支持修改', format);
+        try {
+            const userSpace = (0, user_1.getUserSpace)(username);
+            const listData = await userSpace.listManage.getListData();
+            const userList = listData.userList.find(list => list.id === playlistId);
+            if (playlistId !== 'default' && playlistId !== 'love' && !userList) {
+                return this.sendError(res, 70, 'Playlist not found', format);
+            }
+            const currentMusics = await userSpace.listManage.listDataManage.getListMusics(playlistId);
+            const removeIndexes = this.getListParams(params, 'songIndexToRemove').map(Number);
+            if (removeIndexes.some(index => !Number.isInteger(index) || index < 0 || index >= currentMusics.length)) {
+                return this.sendError(res, 0, 'Invalid songIndexToRemove', format);
+            }
+            // The original Subsonic API removes by zero-based index. A number of
+            // clients use the OpenSubsonic-style songIdToRemove extension instead.
+            const requestedRemoveIds = this.getListParams(params, 'songIdToRemove');
+            const addIds = [...new Set(this.getListParams(params, 'songIdToAdd'))];
+            const addMusics = await this.resolveMusicIds(username, addIds);
+            if (addMusics === null)
+                return this.sendError(res, 70, 'Song not found', format);
+            const addIndexValues = this.getListParams(params, 'songIndexToAdd');
+            const addIndex = addIndexValues.length ? Number(addIndexValues[0]) : null;
+            if (addIndex !== null && (!Number.isInteger(addIndex) || addIndex < 0)) {
+                return this.sendError(res, 0, 'Invalid songIndexToAdd', format);
+            }
+            let changed = false;
+            const name = params.get('name');
+            if (name !== null) {
+                if (!userList)
+                    return this.sendError(res, 0, 'Built-in playlists cannot be renamed', format);
+                if (!name.trim())
+                    return this.sendError(res, 0, 'Playlist name cannot be empty', format);
+                await userSpace.listManage.listDataManage.userListsUpdate([{
+                        ...userList,
+                        name: name.trim(),
+                        locationUpdateTime: Date.now(),
+                    }]);
+                changed = true;
+            }
+            const removeIds = [...new Set([
+                    ...removeIndexes.map(index => currentMusics[index].id),
+                    ...requestedRemoveIds,
+                ])];
+            if (removeIds.length) {
+                await userSpace.listManage.listDataManage.listMusicRemove(playlistId, removeIds);
+                changed = true;
+            }
+            if (addMusics.length) {
+                const location = (0, user_1.getUserConfig)(username)['list.addMusicLocationType'];
+                await userSpace.listManage.listDataManage.listMusicAdd(playlistId, addMusics, location);
+                if (addIndex !== null) {
+                    await userSpace.listManage.listDataManage.listMusicUpdatePosition(playlistId, addIndex, addMusics.map(music => music.id));
+                }
+                changed = true;
+            }
+            if (changed)
+                await userSpace.listManage.createSnapshot();
+            return this.sendResponse(res, {}, format);
+        }
+        catch (err) {
+            console.error('[Subsonic] updatePlaylist error:', err);
+            return this.sendError(res, 0, err.message || 'Failed to update playlist', format);
+        }
+    }
+    async handleCreatePlaylist(res, username, params, format) {
+        const name = params.get('name')?.trim();
+        if (!name)
+            return this.sendError(res, 10, 'Required parameter is missing: name', format);
+        try {
+            const songIds = [...new Set(this.getListParams(params, 'songId'))];
+            const musics = await this.resolveMusicIds(username, songIds);
+            if (musics === null)
+                return this.sendError(res, 70, 'Song not found', format);
+            const userSpace = (0, user_1.getUserSpace)(username);
+            const playlistId = `subsonic_${crypto_1.default.randomUUID()}`;
+            await userSpace.listManage.listDataManage.userListCreate({
+                id: playlistId,
+                name,
+                position: -1,
+                locationUpdateTime: Date.now(),
+            });
+            if (musics.length) {
+                const location = (0, user_1.getUserConfig)(username)['list.addMusicLocationType'];
+                await userSpace.listManage.listDataManage.listMusicAdd(playlistId, musics, location);
+            }
+            await userSpace.listManage.createSnapshot();
+            return this.handleGetPlaylist(res, username, new URLSearchParams({ id: playlistId }), format);
+        }
+        catch (err) {
+            console.error('[Subsonic] createPlaylist error:', err);
+            return this.sendError(res, 0, err.message || 'Failed to create playlist', format);
+        }
+    }
+    async handleDeletePlaylist(res, username, params, format) {
+        const id = params.get('id');
+        if (!id)
+            return this.sendError(res, 10, 'Required parameter is missing: id', format);
+        if (id.startsWith('lb_'))
+            return this.sendError(res, 0, '排行榜为只读播放列表，不支持删除', format);
+        if (id === 'default' || id === 'love') {
+            return this.sendError(res, 0, 'Built-in playlists cannot be deleted', format);
+        }
+        try {
+            const userSpace = (0, user_1.getUserSpace)(username);
+            const listData = await userSpace.listManage.getListData();
+            if (!listData.userList.some(list => list.id === id)) {
+                return this.sendError(res, 70, 'Playlist not found', format);
+            }
+            await userSpace.listManage.listDataManage.userListsRemove([id]);
+            await userSpace.listManage.createSnapshot();
+            return this.sendResponse(res, {}, format);
+        }
+        catch (err) {
+            console.error('[Subsonic] deletePlaylist error:', err);
+            return this.sendError(res, 0, err.message || 'Failed to delete playlist', format);
+        }
+    }
+    // ─────────────────────────────────────────────
+    // [新增] 排行榜(榜单) → 只读 Subsonic 播放列表
+    // 将指定平台榜单(含热歌榜)暴露为 Subsonic 播放列表，
+    // 音流等客户端无需 web 页面即可浏览/播放榜单。榜单为只读，不可增删改。
+    // ─────────────────────────────────────────────
+    getLeaderboardSource() {
+        return global.lx.config['subsonic.leaderboardSource'] || 'tx';
+    }
+    async getLeaderboardPlaylists() {
+        const source = this.getLeaderboardSource();
+        // 系统级 owner：不属于任何具体用户，使其在音流「我的歌单」(owner==我) 过滤中被排除，
+        // 但保留在「全部歌单」中；public:true 确保跨用户可见。
+        const owner = 'lxserver';
+        try {
+            const lb = musicSdk[source]?.leaderboard;
+            if (!lb || typeof lb.getBoards !== 'function')
+                return [];
+            const result = await lb.getBoards();
+            const list = Array.isArray(result?.list) ? result.list : [];
+            return list.map((board) => {
+                const bangid = String(board.bangid);
+                const id = `lb_${source}_${bangid}`;
+                return {
+                    id,
+                    name: `榜单·${board.name}`,
+                    comment: '排行榜(只读)',
+                    owner,
+                    public: true,
+                    songCount: 0,
+                    duration: 0,
+                    created: new Date().toISOString(),
+                    changed: new Date().toISOString(),
+                    coverArt: 'logo',
+                };
+            });
+        }
+        catch (err) {
+            console.error('[Subsonic] getLeaderboardPlaylists error:', err);
+            return [];
+        }
+    }
+    async handleGetLeaderboardPlaylist(res, username, id, format) {
+        const parts = id.split('_'); // ['lb', source, bangid...]
+        const source = parts[1];
+        const bangid = parts.slice(2).join('_');
+        try {
+            const lb = musicSdk[source]?.leaderboard;
+            if (!lb)
+                return this.sendError(res, 70, 'Leaderboard source not found', format);
+            const result = await lb.getBoards();
+            const boards = Array.isArray(result?.list) ? result.list : [];
+            const board = boards.find((b) => String(b.bangid) === bangid);
+            const listName = board ? `榜单·${board.name}` : '排行榜';
+            const data = await lb.getList(bangid, 1);
+            const musics = (data?.list || []).map((s) => {
+                const m = this.normalizeLeaderboardSong(s, source);
+                this.cacheOnlineSong(m);
+                return m;
+            });
+            const coverArt = musics[0]?.img || 'logo';
+            const playlistMeta = {
+                id,
+                name: listName,
+                comment: '排行榜(只读)',
+                owner: 'lxserver',
+                public: true,
+                songCount: musics.length,
+                duration: musics.reduce((sum, m) => sum + this.parseDuration(m.interval), 0),
+                created: new Date().toISOString(),
+                changed: new Date().toISOString(),
+                coverArt,
+            };
+            if (format === 'json') {
+                return this.sendResponse(res, {
+                    playlist: {
+                        ...playlistMeta,
+                        entry: musics.map((m) => this.musicToSongFlat(m, id, undefined, username)),
+                    },
+                }, format);
+            }
+            return this.sendResponse(res, {
+                playlist: {
+                    attrs: playlistMeta,
+                    children: {
+                        entry: musics.map((m) => this.musicToSongXml(m, id, undefined, username)),
+                    },
+                },
+            }, format);
+        }
+        catch (err) {
+            console.error('[Subsonic] handleGetLeaderboardPlaylist error:', err);
+            return this.sendError(res, 0, '获取排行榜失败: ' + (err?.message || err), format);
+        }
+    }
+    /** 补齐榜单歌曲的 LX 标准 id 与封面，确保音流可解析并播放 */
+    normalizeLeaderboardSong(song, source) {
+        const songmid = song.songmid || song.songId || song.id;
+        song.id = `${source}_${songmid}`;
+        song.source = source;
+        if (!song.meta)
+            song.meta = {};
+        if (!song.meta.picUrl && song.img)
+            song.meta.picUrl = song.img;
+        return song;
+    }
+    // getAlbum: 返回 album + song[] 格式（音流等客户端期望的格式）
+    async handleGetAlbum(res, username, params, format) {
+        const id = params.get('id');
+        if (!id)
+            return this.sendError(res, 10, 'Required parameter is missing: id', format);
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        let musics = [];
+        let listName = 'Unknown';
+        let albumPublishTime;
+        if (id === 'love') {
+            musics = listData.loveList;
+            listName = '我的收藏';
+        }
+        else if (id === 'default') {
+            musics = listData.defaultList;
+            listName = '默认列表';
+        }
+        else if (id.startsWith('lib-alb_')) {
+            // 从本地收藏专辑库获取详情，将原始歌曲字段规范化为标准格式
+            const realId = id.replace('lib-alb_', '');
+            const libAlbums = await this.getLibraryData(username, 'albums');
+            const album = libAlbums.find((a) => String(a.id) === realId || String(a.meta?.albumId) === realId);
+            if (album) {
+                listName = album.name;
+                albumPublishTime = album.publishTime;
+                // library 歌曲是原始字段，需要映射成 MusicInfo 兼容格式
+                musics = (album.list || []).map((s) => ({
+                    id: `${s.source}_${s.songmid || s.songId}`,
+                    name: s.name,
+                    singer: s.singer,
+                    source: s.source,
+                    songmid: s.songmid,
+                    interval: s.interval || '0',
+                    img: s.img,
+                    meta: {
+                        picUrl: s.img,
+                        albumName: s.albumName || album.name,
+                        albumId: s.albumMid || album.id,
+                    },
+                }));
+            }
+            /*
+            } else if (id.startsWith('alb_hot_')) {
+                // [新增] 处理虚拟出的歌手热门歌曲专辑
+                const fullArtId = id.replace('alb_hot_', '')
+                let source = 'wy'
+                let artistId = fullArtId
+                if (fullArtId.startsWith('art_')) {
+                    const parts = fullArtId.split('_')
+                    source = parts[1]
+                    artistId = parts.slice(2).join('_')
+                }
+                if (musicSdk[source]?.extendDetail) {
+                    try {
+                        // [修改] 统一使用 5 页 (500 首) 循环抓取
+                        const MAX_PAGES = 5
+                        const PAGE_SIZE = 100
+                        let all: any[] = []
+                        for (let p = 1; p <= MAX_PAGES; p++) {
+                            const data = await musicSdk[source].extendDetail.getArtistSongs(artistId, p, PAGE_SIZE, 'hot')
+                            const pageList = data.list || []
+                            all = all.concat(pageList)
+                            if (pageList.length < PAGE_SIZE) break
+                        }
+                        musics = all.map((s: any) => ({
+                            ...s,
+                            id: `${source}_${s.songmid || s.songId}`
+                        }))
+                        listName = '热门歌曲'
+                    } catch (e) {
+                        console.error(`[Subsonic] SDK getArtistSongs (for virtual album) error:`, e)
+                    }
+                }
+            */
+        }
+        else if (id.startsWith('radio_tx_')) {
+            // [新增] 处理电台详情，作为虚拟专辑返回
+            const radioId = id.replace('radio_tx_', '');
+            try {
+                const songs = await (0, discovery_1.fetchRadioSongs)(radioId);
+                listName = '官方电台'; // 默认名，如果有缓存可以查找真实名
+                musics = (songs || []).map((s) => ({
+                    id: `tx_${s.songmid || s.mid}`,
+                    name: s.songname || s.name,
+                    singer: (s.singer || []).map((si) => si.name).join('、'),
+                    source: 'tx',
+                    songmid: s.songmid || s.mid,
+                    interval: s.interval || 0,
+                    img: s.albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.albummid}.jpg` : '',
+                    meta: {
+                        albumName: '官方电台',
+                        albumId: id,
+                        picUrl: s.albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.albummid}.jpg` : ''
+                    }
+                }));
+            }
+            catch (e) {
+                console.error(`[Subsonic] Fetch radio songs failed:`, e);
+            }
+        }
+        else if (id.startsWith('alb_tx_playlist_')) {
+            // [新增] 处理虚拟出的歌单详情
+            const dissid = id.replace('alb_tx_playlist_', '');
+            try {
+                const result = await (0, discovery_1.fetchPlaylistSongs)(dissid);
+                listName = result.name;
+                musics = result.list;
+            }
+            catch (e) {
+                console.error(`[Subsonic] Fetch playlist detail failed:`, e);
+            }
+        }
+        else if (id.startsWith('alb_')) {
+            // [新增] 处理来自 SDK 的专辑详情
+            const parts = id.split('_');
+            const source = parts[1];
+            const realId = parts.slice(2).join('_');
+            // console.log(`[Subsonic] getAlbum SDK Route: source=${source}, realId=${realId}`)
+            if (musicSdk[source]?.extendDetail?.getAlbumSongs) {
+                try {
+                    const data = await musicSdk[source].extendDetail.getAlbumSongs(realId);
+                    // console.log(`[Subsonic] getAlbum SDK Response: name=${data?.name}, songCount=${data?.list?.length}`)
+                    musics = (data.list || []).map((s) => ({
+                        ...s,
+                        id: `${source}_${s.songmid || s.songId}`,
+                        source
+                    }));
+                    // [优化] 如果数据里没带专辑名，从第一首歌里提取
+                    listName = data.name || musics[0]?.albumName || musics[0]?.meta?.albumName || 'Album Detail';
+                    albumPublishTime = data.publishTime;
+                }
+                catch (e) {
+                    console.error(`[Subsonic] SDK getAlbumSongs error for ${id}:`, e?.message);
+                }
+            }
+            else {
+                console.warn(`[Subsonic] SDK missing extendDetail.getAlbumSongs for ${source}`);
+            }
+        }
+        else if (id.startsWith('album_')) {
+            // 聚合专辑 ID（由 getAlbumList/getAlbumList2 生成）
+            const allMusicsMap = new Map();
+            const collectInto = (songs, listId) => {
+                for (const m of songs) {
+                    const albumName = m.meta?.albumName || m.name;
+                    const singer = m.singer || 'Unknown';
+                    const key = `album_${Buffer.from(`${albumName}__${singer}`).toString('base64url').slice(0, 24)}`;
+                    if (!allMusicsMap.has(key))
+                        allMusicsMap.set(key, []);
+                    allMusicsMap.get(key).push({ music: m, listId });
+                }
+            };
+            collectInto(listData.loveList, 'love');
+            collectInto(listData.defaultList, 'default');
+            for (const list of listData.userList)
+                collectInto((list.list || []), list.id);
+            const entries = allMusicsMap.get(id) || [];
+            musics = entries.map(e => e.music);
+            if (musics.length > 0) {
+                listName = musics[0].meta?.albumName || musics[0].name;
+            }
+        }
+        else if (id.includes('_')) {
+            // 动态支持：如果客户端把某首歌的 id 当作专辑 id 来查
+            const found = await this.findMusicById(username, id);
+            if (found) {
+                musics = [found.music];
+                listName = found.music.name;
+            }
+            else {
+                // 如果在列表里没找到，尝试解析 ID 构造
+                const parts = id.split('_');
+                const source = parts[0];
+                const songmid = parts.slice(1).join('_');
+                if (musicSdk[source]) {
+                    musics = [{ id, name: 'Unknown', singer: 'Unknown', source, songmid, interval: '0' }];
+                    listName = 'Single Album';
+                }
+            }
+        }
+        else {
+            const list = listData.userList.find((l) => l.id === id);
+            if (list) {
+                listName = list.name;
+                musics = (list.list || []);
+            }
+        }
+        const albumMeta = {
+            id,
+            name: listName,
+            title: listName,
+            album: listName,
+            artist: (musics.length === 1) ? musics[0].singer : 'LX Music',
+            artistId: (musics.length === 1) ? (musics[0].singerId ? `art_${musics[0].source}_${musics[0].singerId}` : `artist_${(musics[0].singer || '').split('、')[0]}`) : 'artist_lxmusic',
+            songCount: musics.length,
+            duration: musics.reduce((sum, m) => sum + this.parseDuration(m.interval), 0),
+            created: new Date().toISOString(),
+            // [修复] 优先使用图片的真实 URL，而不是 ID，以规避后端 getCoverArt 抓取失败的问题
+            coverArt: musics[0]?.meta?.picUrl || musics[0]?.img || id,
+            isDir: true,
+            playCount: 0,
+            year: albumPublishTime ? parseInt(albumPublishTime.split(/[/-]/)[0]) : (musics[0]?.year || musics[0]?.meta?.year),
+        };
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                album: {
+                    ...albumMeta,
+                    song: musics.map((m) => this.musicToSongFlat(m, id, albumMeta.artistId, username)),
+                },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            album: {
+                attrs: albumMeta,
+                children: {
+                    song: musics.map((m) => this.musicToSongXml(m, id, albumMeta.artistId, username)),
+                },
+            },
+        }, format);
+    }
+    async handleGetSong(res, username, params, format) {
+        const id = params.get('id');
+        if (!id)
+            return this.sendError(res, 10, 'Required parameter is missing: id', format);
+        let music = null;
+        let listId = 'online';
+        const found = await this.findMusicById(username, id);
+        if (found) {
+            music = found.music;
+            listId = found.listId;
+        }
+        else if (id.includes('_')) {
+            // 在线歌曲 ID 动态元数据兜底 (处理 wy_1378492134, tx_... 等客户端请求非本地库歌曲)
+            const parts = id.split('_');
+            const source = parts[0];
+            const songmid = parts.slice(1).join('_');
+            const title = params.get('title') || params.get('name') || songmid;
+            const singer = params.get('artist') || params.get('singer') || 'Unknown Artist';
+            music = {
+                id,
+                name: title,
+                singer: singer,
+                source: source,
+                songmid: songmid,
+                interval: '0',
+                meta: {
+                    songId: songmid,
+                },
+            };
+        }
+        if (!music)
+            return this.sendError(res, 70, 'Song not found: ' + id, format);
+        if (format === 'json') {
+            return this.sendResponse(res, { song: this.musicToSongFlat(music, listId, undefined, username) }, format);
+        }
+        return this.sendResponse(res, { song: this.musicToSongXml(music, listId, undefined, username) }, format);
+    }
+    async handleGetMusicDirectory(res, username, params, format) {
+        const id = params.get('id');
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        if (!id || id === '1' || id === 'root') {
+            const dirs = [
+                { id: 'love', parent: 'root', title: '我的收藏', isDir: true, coverArt: listData.loveList[0]?.meta?.picUrl || listData.loveList[0]?.img || 'logo' },
+                { id: 'default', parent: 'root', title: '默认列表', isDir: true, coverArt: listData.defaultList[0]?.meta?.picUrl || listData.defaultList[0]?.img || 'logo' },
+                { id: 'radios', parent: 'root', title: '官方电台', isDir: true },
+                ...listData.userList.map((l) => ({
+                    id: l.id,
+                    parent: 'root',
+                    title: l.name,
+                    isDir: true,
+                    coverArt: l.Album || l.picUrl || l.list?.[0]?.meta?.picUrl || l.list?.[0]?.img || 'logo',
+                })),
+            ];
+            if (format === 'json') {
+                return this.sendResponse(res, {
+                    directory: { id: 'root', name: 'Music', child: dirs },
+                }, format);
+            }
+            return this.sendResponse(res, {
+                directory: {
+                    attrs: { id: 'root', name: 'Music' },
+                    children: { child: dirs.map(d => ({ attrs: d })) },
+                },
+            }, format);
+        }
+        if (id === 'radios') {
+            // [新增] 返回官方电台列表
+            // const radios = await fetchRadios()
+            const radios = [];
+            const dirs = radios.map(r => ({
+                id: r.id,
+                parent: 'radios',
+                title: r.name,
+                name: r.name,
+                isDir: true,
+                coverArt: r.coverArt
+            }));
+            if (format === 'json') {
+                return this.sendResponse(res, { directory: { id: 'radios', name: '官方电台', child: dirs } }, format);
+            }
+            return this.sendResponse(res, {
+                directory: {
+                    attrs: { id: 'radios', name: '官方电台' },
+                    children: { child: dirs.map(d => ({ attrs: d })) }
+                }
+            }, format);
+        }
+        let musics = [];
+        let dirName = 'Unknown';
+        if (id.startsWith('radio_tx_')) {
+            // [新增] 返回具体电台内的歌曲
+            // const radioId = id.replace('radio_tx_', '')
+            try {
+                // const songs = await fetchRadioSongs(radioId)
+                const songs = [];
+                dirName = '电台列表';
+                musics = (songs || []).map((s) => ({
+                    id: `tx_${s.songmid || s.mid}`,
+                    name: s.songname || s.name,
+                    singer: (s.singer || []).map((si) => si.name).join('、'),
+                    source: 'tx',
+                    songmid: s.songmid || s.mid,
+                    interval: s.interval || 0,
+                    img: s.albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.albummid}.jpg` : '',
+                    meta: {
+                        albumName: '官方电台',
+                        albumId: id,
+                        picUrl: s.albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.albummid}.jpg` : ''
+                    }
+                }));
+            }
+            catch (e) {
+                console.error(`[Subsonic] Fetch radio songs failed:`, e);
+            }
+        }
+        else if (id === 'love') {
+            musics = listData.loveList;
+            dirName = '我的收藏';
+        }
+        else if (id === 'default') {
+            musics = listData.defaultList;
+            dirName = '默认列表';
+        }
+        else {
+            const list = listData.userList.find((l) => l.id === id);
+            if (list) {
+                dirName = list.name;
+                musics = (list.list || []);
+            }
+        }
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                directory: {
+                    id,
+                    name: dirName,
+                    child: musics.map((m) => this.musicToSongFlat(m, id, undefined, username)),
+                },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            directory: {
+                attrs: { id, name: dirName },
+                children: {
+                    child: musics.map((m) => this.musicToSongXml(m, id, undefined, username)),
+                },
+            },
+        }, format);
+    }
+    async handleGetAlbumList(res, username, params, format, isV2) {
+        const type = params.get('type') || 'newest';
+        const size = Math.min(parseInt(params.get('size') || '10'), 500);
+        const offset = parseInt(params.get('offset') || '0');
+        if (global.lx.config['subsonic.enableDebug']) {
+            console.log(`[Subsonic Debug] [AlbumList] type=${type} offset=${offset} size=${size}`);
+        }
+        let albums = [];
+        // [推荐逻辑] 根据 type 处理推荐。只有 offset=0 时才展示推荐，便于发现
+        // newest/recent/random/byGenre 均走推荐（新专辑/随机推荐），让首页/每日推荐有封面
+        if ((type === 'recent' || type === 'newest' || type === 'random' || type === 'byGenre') && offset === 0) {
+            try {
+                if (type === 'byGenre') {
+                    const genreNameOrId = params.get('genre') || '';
+                    // 尝试从 fetchGenres 中寻找 ID (如果传入的是名称)
+                    let categoryId = genreNameOrId;
+                    if (isNaN(parseInt(genreNameOrId))) {
+                        const genres = await (0, discovery_1.fetchGenres)();
+                        const target = genres.find(g => g.value === genreNameOrId);
+                        if (target)
+                            categoryId = target.id;
+                    }
+                    if (categoryId) {
+                        albums = await (0, discovery_1.fetchPlaylistsByGenre)(categoryId, size);
+                    }
+                }
+                else {
+                    // recent/newest 取新专辑；random 取随机推荐。recent/newest 取不到(空或抛错)时回退到 random
+                    const rType = (type === 'random') ? 'random' : 'recent';
+                    let recommendations = [];
+                    try {
+                        recommendations = await cachedRecommend(rType, size);
+                    }
+                    catch (e) {
+                        console.error(`[Subsonic] recommend (${rType}) failed:`, e);
+                    }
+                    if (recommendations.length === 0 && rType === 'recent') {
+                        try {
+                            recommendations = await cachedRecommend('random', size);
+                        }
+                        catch (e) {
+                            console.error(`[Subsonic] recommend fallback (random) failed:`, e);
+                        }
+                    }
+                    if (recommendations.length > 0) {
+                        albums = recommendations;
+                    }
+                }
+            }
+            catch (e) {
+                console.error(`[Subsonic] Fetch recommended albums (${type}) failed:`, e);
+            }
+        }
+        // 如果未命中推荐逻辑，或推荐获取为空，则回退到本地收藏库
+        if (albums.length === 0) {
+            const libAlbums = await this.getLibraryData(username, 'albums');
+            const buildAlbum = (album) => {
+                const source = album.source || 'wy';
+                const primarySinger = (album.artistName || '').split('、')[0] || 'LX Music';
+                const artistId = album.singerId ? `art_${source}_${album.singerId}` : `artist_${primarySinger}`;
+                return {
+                    id: `alb_${source}_${album.id}`,
+                    name: album.name,
+                    title: album.name,
+                    album: album.name,
+                    artist: album.artistName || 'LX Music',
+                    artistId: artistId,
+                    isDir: true,
+                    coverArt: album.picUrl || album.meta?.picUrl || this.buildAlbumCoverUrl(source, String(album.id)) || `alb_${source}_${album.id}`,
+                    songCount: (album.list || []).length,
+                    duration: (album.list || []).reduce((s, m) => s + this.parseDuration(m.interval), 0),
+                    created: new Date().toISOString(),
+                    playCount: 0,
+                    year: album.publishTime ? parseInt(String(album.publishTime).split(/[/-]/)[0]) : undefined,
+                };
+            };
+            const page = libAlbums.slice(offset, offset + size);
+            albums = page.map(buildAlbum);
+        }
+        const wrapKey = isV2 ? 'albumList2' : 'albumList';
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                [wrapKey]: { album: albums },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            [wrapKey]: {
+                children: { album: albums.map(alb => ({ attrs: alb })) },
+            },
+        }, format);
+    }
+    async handleGetArtists(res, username, format) {
+        // [修改] 歌手列表首选来自收藏的歌手库
+        const libArtists = await this.getLibraryData(username, 'artists');
+        // [修复] 标记已收藏歌手，让 Subsonic 客户端（音流/Ultrasonic 等）能显示爱心高亮
+        const meta = await this.getUserSubsonicMeta(username);
+        const starredArtistSet = new Set(meta.starredArtists);
+        const starredArtistNameSet = new Set(meta.starredArtistNames);
+        const isArtistStarred = (source, id, name) => starredArtistSet.has(`art_${source || 'wy'}_${id}`) ||
+            starredArtistNameSet.has(this.normalizeArtistName(name));
+        const artists = libArtists.map(artist => {
+            const id = `art_${artist.source || 'wy'}_${artist.id}`;
+            const starred = isArtistStarred(artist.source, artist.id, artist.name);
+            return {
+                id: id,
+                name: artist.name,
+                albumCount: 0,
+                coverArt: id,
+                artistImageUrl: artist.picUrl || artist.img,
+                ...(starred ? { starred: new Date().toISOString() } : {}),
+            };
+        });
+        // 按首字母分组
+        const indexMap = new Map();
+        for (const a of artists) {
+            const firstChar = a.name[0]?.toUpperCase() || '#';
+            const key = /[A-Z]/.test(firstChar) ? firstChar : '#';
+            if (!indexMap.has(key))
+                indexMap.set(key, []);
+            indexMap.get(key).push(a);
+        }
+        const indexArr = Array.from(indexMap.entries())
+            .sort((a, b) => a[0].localeCompare(b[0]))
+            .map(([name, artistList]) => ({
+            name,
+            artist: artistList,
+        }));
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                artists: { ignoredArticles: 'The An A Die Das Ein', index: indexArr },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            artists: {
+                attrs: { ignoredArticles: 'The An A Die Das Ein' },
+                children: {
+                    index: indexArr.map(idx => ({
+                        attrs: { name: idx.name },
+                        children: { artist: idx.artist.map(a => ({ attrs: a })) }
+                    }))
+                },
+            },
+        }, format);
+    }
+    async handleGetArtist(res, username, params, format) {
+        const id = params.get('id');
+        if (!id)
+            return this.sendError(res, 10, 'Required parameter is missing: id', format);
+        // [修复] 收藏元数据：用于判断当前歌手是否已收藏（客户端爱心高亮）
+        const meta = await this.getUserSubsonicMeta(username);
+        const starredArtistSet = new Set(meta.starredArtists);
+        const starredArtistNameSet = new Set(meta.starredArtistNames);
+        let source = 'wy';
+        let artistId = '';
+        let singerName = 'Unknown';
+        // 严格解析规范 ID: art_source_id
+        if (id.startsWith('art_')) {
+            const parts = id.split('_');
+            source = parts[1];
+            artistId = parts.slice(2).join('_');
+        }
+        else if (id.startsWith('artist_')) {
+            // 兼容旧版或 Fallback: 使用 getSingerMid 动态寻址
+            singerName = decodeURIComponent(id.slice(7));
+            const mid = await (0, singer_1.getSingerMid)(singerName);
+            if (mid) {
+                source = 'tx'; // 寻址成功后默认切换到 TX
+                artistId = mid;
+            }
+            else {
+                artistId = singerName;
+            }
+        }
+        else {
+            artistId = id;
+        }
+        // 定义精准的平台 ID (用于封面和元数据绑定)
+        const resolvedId = (source && artistId && artistId !== id) ? `art_${source}_${artistId}` : id;
+        // 调用 SDK 获取详情
+        let albums = [];
+        let hotSongs = [];
+        let artistPic = '';
+        try {
+            if (musicSdk[source]?.extendDetail) {
+                // 1. 先抓取专辑列表 (顺序执行以保证稳定性)
+                const albumData = await musicSdk[source].extendDetail.getArtistAlbums(artistId, 1).catch(() => ({ list: [] }));
+                const rawAlbums = albumData.list || [];
+                // 2. 循环抓取多页歌曲 (最多 5 页，共 500 首)
+                const fetchAllSongs = async () => {
+                    const MAX_PAGES = 5;
+                    const PAGE_SIZE = 100;
+                    let all = [];
+                    for (let p = 1; p <= MAX_PAGES; p++) {
+                        try {
+                            const data = await musicSdk[source].extendDetail.getArtistSongs(artistId, p, PAGE_SIZE, 'hot');
+                            const pageList = data.list || [];
+                            all = all.concat(pageList);
+                            if (pageList.length < PAGE_SIZE)
+                                break;
+                        }
+                        catch (err) {
+                            console.error(`[Subsonic] SDK getArtistSongs Error at page ${p}:`, err);
+                            break;
+                        }
+                    }
+                    return all;
+                };
+                const allSongsRaw = await fetchAllSongs();
+                // [关键修复] 必须先恢复 singerName 才能进行 albums.map
+                // 优先级：从热门歌曲中提取 > 从本地收藏库匹配 > 原有推断
+                if (allSongsRaw.length > 0) {
+                    singerName = allSongsRaw[0].singer;
+                    if (allSongsRaw[0].singerPic)
+                        artistPic = allSongsRaw[0].singerPic;
+                }
+                if (singerName === 'Unknown' || !singerName) {
+                    const libArtists = await this.getLibraryData(username, 'artists');
+                    const localArt = libArtists.find(a => (a.source === source && a.id === artistId) || a.name === artistId);
+                    if (localArt)
+                        singerName = localArt.name;
+                }
+                if (albumData.list?.[0]?.singerPic)
+                    artistPic = albumData.list[0].singerPic;
+                if (albumData.list?.[0]?.singerName && (singerName === 'Unknown' || !singerName)) {
+                    singerName = albumData.list[0].singerName;
+                }
+                albums = rawAlbums.map((alb) => ({
+                    id: `alb_${source}_${alb.id || alb.albumMid}`,
+                    name: alb.name,
+                    title: alb.name,
+                    album: alb.name,
+                    artist: singerName || alb.singerName || 'Unknown',
+                    artistId: resolvedId,
+                    songCount: alb.total || 0,
+                    coverArt: alb.img || alb.picUrl || resolvedId,
+                    isDir: true,
+                    year: alb.publishTime ? parseInt(String(alb.publishTime).split(/[/-]/)[0]) : undefined,
+                }));
+                hotSongs = allSongsRaw.map((s) => ({
+                    ...s,
+                    id: `${source}_${s.songmid || s.songId}`
+                }));
+            }
+        }
+        catch (e) {
+            console.error(`[Subsonic] SDK Artist load error:`, e);
+        }
+        /*
+        // 构造一个虚拟专辑放置热门歌曲，这在多数 Subsonic 客户端中不仅能显示歌曲，还能保持列表整洁
+        if (hotSongs.length > 0) {
+            albums.unshift({
+                id: `alb_hot_${id}`, // 使用 alb_ 前缀确保可以被 handleGetAlbum 处理
+                name: `${singerName} - 热门歌曲`,
+                artist: singerName,
+                artistId: id,
+                songCount: hotSongs.length,
+                coverArt: id // 歌手的照片
+            })
+        }
+        */
+        const artistStarred = starredArtistSet.has(resolvedId) ||
+            starredArtistNameSet.has(this.normalizeArtistName(singerName));
+        const artistInfo = {
+            id,
+            name: singerName,
+            albumCount: albums.length,
+            songCount: hotSongs.length,
+            coverArt: resolvedId,
+            artistImageUrl: artistPic || resolvedId,
+            ...(artistStarred ? { starred: new Date().toISOString() } : {}),
+        };
+        // 这里的关键：Subsonic getArtist 响应中可以包含 album 和 song
+        // 音流等客户端会优先显示这些 song 在“歌曲”标签页或“热门”列表里
+        // 这里的关键：Subsonic getArtist 响应中可以包含 album 和 song
+        // 音流等客户端会优先显示这些 song 在“歌曲”标签页或“热门”列表里
+        // [修复] 传入 id 作为 artistIdOverride，确保歌曲显示与当前歌手页面归属匹配
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                artist: {
+                    ...artistInfo,
+                    album: albums,
+                    song: hotSongs.map((m) => this.musicToSongFlat(m, id, id, username))
+                },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            artist: {
+                attrs: artistInfo,
+                children: {
+                    album: albums.map(a => ({ attrs: a })),
+                    song: hotSongs.map((m) => this.musicToSongXml(m, id, id, username))
+                },
+            },
+        }, format);
+    }
+    async handleGetArtistInfo(res, username, params, format) {
+        const id = params.get('id') || '';
+        const artistName = params.get('artist') || '';
+        const libArtists = await this.getLibraryData(username, 'artists');
+        const artistEntry = libArtists.find(a => (id && `art_${a.source || 'wy'}_${a.id}` === id) ||
+            (artistName && a.name.toLowerCase() === artistName.toLowerCase()));
+        const name = artistEntry?.name || artistName || id.replace('artist_', '');
+        const detail = await (0, singer_1.getSingerDetail)(name);
+        const pic = detail?.pic || (artistEntry ? (artistEntry.picUrl || artistEntry.img) : '');
+        const info = {
+            biography: detail?.desc || (artistEntry ? `Artist: ${artistEntry.name} (Source: ${artistEntry.source})` : ''),
+            musicBrainzId: '',
+            lastFmUrl: '',
+            smallImageUrl: pic,
+            mediumImageUrl: pic,
+            largeImageUrl: pic,
+        };
+        if (format === 'json') {
+            return this.sendResponse(res, { artistInfo2: info }, format);
+        }
+        return this.sendResponse(res, { artistInfo2: { attrs: info } }, format);
+    }
+    async handleGetGenres(res, username, format) {
+        const genres = await (0, discovery_1.fetchGenres)();
+        // console.log(`[Subsonic] handleGetGenres found ${genres.length} genres`)
+        if (format === 'json') {
+            return this.sendResponse(res, { genres: { genre: genres } }, format);
+        }
+        return this.sendResponse(res, {
+            genres: {
+                children: {
+                    genre: genres.map(g => ({ attrs: { songCount: g.songCount, albumCount: g.albumCount }, children: g.value }))
+                }
+            }
+        }, format);
+    }
+    async handleGetInternetRadioStations(res, format) {
+        // const radios = await fetchRadios()
+        const radios = [];
+        if (format === 'json') {
+            return this.sendResponse(res, { internetRadioStations: { internetRadioStation: radios } }, format);
+        }
+        return this.sendResponse(res, {
+            internetRadioStations: {
+                children: {
+                    internetRadioStation: radios.map(r => ({ attrs: r }))
+                }
+            }
+        }, format);
+    }
+    async fetchOnlineSearchSongs(cleanQuery, sources, limit = 30) {
+        if (!cleanQuery)
+            return [];
+        const validSources = sources.filter(s => ['wy', 'tx', 'kw', 'kg', 'mg'].includes(s) && musicSdk[s]?.musicSearch?.search);
+        const cacheKey = `${cleanQuery.toLowerCase()}::${validSources.join(',')}`;
+        const cached = this.onlineSearchCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now())
+            return cached.results;
+        const sourceResults = new Map();
+        // 每个平台一次取足上限，后续 songOffset 分页复用同一批稳定结果。
+        const targetLimit = 50;
+        await Promise.all(validSources.map(async (source) => {
+            const results = [];
+            sourceResults.set(source, results);
+            try {
+                // 计算需要的页数 (网易云 wy 单页限制 20 条，如需要 50 条则自动抓取前 3 页)
+                const pageSize = source === 'kg' ? Math.min(targetLimit, 100) : source === 'wy' ? 20 : 30;
+                const pagesToFetch = Math.min(Math.ceil(targetLimit / pageSize), 3); // 最多自动抓取前 3 页
+                const allItems = [];
+                const existingIds = new Set();
+                for (let page = 1; page <= pagesToFetch; page++) {
+                    const searchRes = await musicSdk[source].musicSearch.search(cleanQuery, page, pageSize);
+                    const list = Array.isArray(searchRes?.list) ? searchRes.list : [];
+                    if (list.length === 0)
+                        break;
+                    for (const item of list) {
+                        const songmid = String(item.songmid || item.id || '');
+                        if (!songmid || existingIds.has(songmid))
+                            continue;
+                        existingIds.add(songmid);
+                        allItems.push(item);
+                    }
+                    if (allItems.length >= targetLimit)
+                        break;
+                }
+                for (const item of allItems.slice(0, targetLimit)) {
+                    const songmid = String(item.songmid || item.id || '');
+                    const id = `${source}_${songmid}`;
+                    const hash = item.hash || item.meta?.hash || item.types?.[0]?.hash || '';
+                    const music = {
+                        id,
+                        name: item.name,
+                        singer: item.singer,
+                        source: source,
+                        songmid: songmid,
+                        hash: hash,
+                        interval: item.interval || '0',
+                        _interval: item._interval || item.interval || '0',
+                        img: item.img,
+                        types: item.types || item._types || [],
+                        _types: item._types || item.types || {},
+                        meta: {
+                            ...(item.meta || {}),
+                            hash: hash,
+                            picUrl: item.img,
+                            albumName: item.albumName || item.name,
+                            albumId: item.albumId,
+                            qualitys: item.types || item._types || [],
+                            _types: item._types || item.types || {},
+                        },
+                    };
+                    this.cacheOnlineSong(music);
+                    results.push({ music, listId: 'online' });
+                }
+            }
+            catch (err) {
+                console.error(`[Subsonic] Online search error for source=${source}:`, err?.message || err);
+            }
+        }));
+        const interleaved = [];
+        const maxLength = Math.max(0, ...validSources.map(source => sourceResults.get(source)?.length || 0));
+        for (let index = 0; index < maxLength; index++) {
+            for (const source of validSources) {
+                const item = sourceResults.get(source)?.[index];
+                if (item)
+                    interleaved.push(item);
+            }
+        }
+        if (this.onlineSearchCache.size >= 100) {
+            const firstKey = this.onlineSearchCache.keys().next().value;
+            if (firstKey)
+                this.onlineSearchCache.delete(firstKey);
+        }
+        this.onlineSearchCache.set(cacheKey, { expiresAt: Date.now() + 5 * 60 * 1000, results: interleaved });
+        return interleaved;
+    }
+    async handleSearch(res, username, params, format, method = 'search3') {
+        let rawQuery = (params.get('query') || '').trim();
+        if (rawQuery === '""' || rawQuery === "''")
+            rawQuery = ''; // 处理某些客户端发送的空占位符
+        // 0. 解析搜索前缀与搜索模式
+        let searchMode = 'fallback';
+        let targetOnlineSources = String(global.lx.config['subsonic.onlineSearchSources'] || 'wy,tx,kw,kg,mg').split(',').map(s => s.trim()).filter(Boolean);
+        let cleanQuery = rawQuery;
+        const lowerQuery = rawQuery.toLowerCase();
+        if (lowerQuery.startsWith('local:') || lowerQuery.startsWith('local：')) {
+            searchMode = 'local_only';
+            cleanQuery = rawQuery.slice(6).trim();
+        }
+        else if (lowerQuery.startsWith('online:') || lowerQuery.startsWith('online：') || lowerQuery.startsWith('net:') || lowerQuery.startsWith('net：')) {
+            searchMode = 'force_online';
+            const colonIdx = rawQuery.indexOf(':') !== -1 ? rawQuery.indexOf(':') : rawQuery.indexOf('：');
+            cleanQuery = rawQuery.slice(colonIdx + 1).trim();
+        }
+        else {
+            // 检查指定的音源前缀: wy:, tx:, kw:, kg:, mg:
+            const knownSources = ['wy', 'tx', 'kw', 'kg', 'mg'];
+            let matchedPrefixSource = '';
+            for (const s of knownSources) {
+                if (lowerQuery.startsWith(`${s}:`) || lowerQuery.startsWith(`${s}：`)) {
+                    matchedPrefixSource = s;
+                    break;
+                }
+            }
+            if (matchedPrefixSource) {
+                searchMode = 'force_online';
+                targetOnlineSources = [matchedPrefixSource];
+                const colonIdx = rawQuery.indexOf(':') !== -1 ? rawQuery.indexOf(':') : rawQuery.indexOf('：');
+                cleanQuery = rawQuery.slice(colonIdx + 1).trim();
+            }
+            else if (lowerQuery.startsWith('all:') || lowerQuery.startsWith('all：')) {
+                searchMode = 'force_online';
+                const colonIdx = rawQuery.indexOf(':') !== -1 ? rawQuery.indexOf(':') : rawQuery.indexOf('：');
+                cleanQuery = rawQuery.slice(colonIdx + 1).trim();
+            }
+            else {
+                const requestedSource = (params.get('source') || params.get('musicFolderId') || '').trim().toLowerCase();
+                if (requestedSource === 'local') {
+                    searchMode = 'local_only';
+                }
+                else if (requestedSource === 'all') {
+                    searchMode = 'force_online';
+                }
+                else if (knownSources.includes(requestedSource)) {
+                    searchMode = 'force_online';
+                    targetOnlineSources = [requestedSource];
+                }
+                else {
+                    // 没有明确指定音源时，遵循全局后台配置
+                    const isOnlineEnabled = global.lx.config['subsonic.onlineSearch'] !== false;
+                    if (!isOnlineEnabled) {
+                        searchMode = 'local_only';
+                    }
+                    else {
+                        searchMode = global.lx.config['subsonic.onlineSearchMode'] || 'fallback';
+                    }
+                }
+            }
+        }
+        const queryForFilter = cleanQuery.toLowerCase();
+        // 1. 汇总所有本地歌曲 (去重)
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        const allSongsMap = new Map();
+        const collectSongs = (list, listId) => {
+            for (const m of list) {
+                if (!allSongsMap.has(m.id)) {
+                    allSongsMap.set(m.id, { music: m, listId });
+                }
+            }
+        };
+        collectSongs(listData.loveList, 'love');
+        collectSongs(listData.defaultList, 'default');
+        for (const list of listData.userList) {
+            collectSongs((list.list || []), list.id);
+        }
+        // 补充本地收藏专辑库中的歌曲
+        const libAlbums = await this.getLibraryData(username, 'albums');
+        for (const alb of libAlbums) {
+            const source = alb.source || 'wy';
+            for (const s of (alb.list || [])) {
+                const songId = `${source}_${s.songmid || s.songId}`;
+                if (!allSongsMap.has(songId)) {
+                    allSongsMap.set(songId, {
+                        music: {
+                            id: songId,
+                            name: s.name,
+                            singer: s.singer,
+                            source: source,
+                            songmid: s.songmid,
+                            interval: s.interval || '0',
+                            img: s.img,
+                            meta: {
+                                picUrl: s.img,
+                                albumName: s.albumName || alb.name,
+                                albumId: s.albumMid || alb.id,
+                            },
+                        },
+                        listId: `alb_${source}_${alb.id}`,
+                    });
+                }
+            }
+        }
+        const allLocalSongs = Array.from(allSongsMap.values());
+        // 2. 汇总所有歌手 (去重)
+        const allArtistsMap = new Map();
+        const libArtists = await this.getLibraryData(username, 'artists');
+        for (const a of libArtists) {
+            const id = `art_${a.source || 'wy'}_${a.id}`;
+            allArtistsMap.set(id, {
+                id,
+                name: a.name,
+                coverArt: id,
+                artistImageUrl: a.picUrl || a.img,
+                albumCount: 0,
+            });
+        }
+        for (const { music } of allLocalSongs) {
+            const singer = music.singer || 'Unknown Artist';
+            const primarySinger = (singer.split('、')[0] || 'Unknown Artist').trim();
+            const source = music.source;
+            const artistId = music.singerId ? `art_${source}_${music.singerId}` : `artist_${primarySinger}`;
+            if (!allArtistsMap.has(artistId)) {
+                allArtistsMap.set(artistId, {
+                    id: artistId,
+                    name: primarySinger,
+                    coverArt: artistId,
+                    albumCount: 0,
+                });
+            }
+        }
+        const allLocalArtists = Array.from(allArtistsMap.values());
+        // 3. 汇总所有专辑 (去重)
+        const allAlbumsMap = new Map();
+        for (const alb of libAlbums) {
+            const source = alb.source || 'wy';
+            const primarySinger = (alb.artistName || '').split('、')[0] || 'LX Music';
+            const artistId = alb.singerId ? `art_${source}_${alb.singerId}` : `artist_${primarySinger}`;
+            const albId = `alb_${source}_${alb.id}`;
+            allAlbumsMap.set(albId, {
+                id: albId,
+                name: alb.name,
+                title: alb.name,
+                album: alb.name,
+                artist: alb.artistName || 'LX Music',
+                artistId: artistId,
+                isDir: true,
+                coverArt: alb.picUrl || alb.meta?.picUrl || albId,
+                songCount: (alb.list || []).length,
+                duration: (alb.list || []).reduce((s, m) => s + this.parseDuration(m.interval), 0),
+                created: new Date().toISOString(),
+                playCount: 0,
+                year: alb.publishTime ? parseInt(String(alb.publishTime).split(/[/-]/)[0]) : undefined,
+            });
+        }
+        for (const { music } of allLocalSongs) {
+            const meta = music.meta || {};
+            const albumName = meta.albumName || music.albumName || music.album?.name;
+            const rawAlbumId = music.albumMid || music.album?.mid || meta.albumId || music.albumId || music.album?.id;
+            if (albumName && albumName !== 'Unknown Album') {
+                const source = music.source;
+                const albId = rawAlbumId ? `alb_${source}_${rawAlbumId}` : `album_${Buffer.from(`${albumName}__${music.singer}`).toString('base64url').slice(0, 24)}`;
+                if (!allAlbumsMap.has(albId)) {
+                    const primarySinger = (music.singer || '').split('、')[0] || 'Unknown Artist';
+                    const artistId = music.singerId ? `art_${source}_${music.singerId}` : `artist_${primarySinger}`;
+                    const picUrl = meta.picUrl || music.img || music.pic;
+                    allAlbumsMap.set(albId, {
+                        id: albId,
+                        name: albumName,
+                        title: albumName,
+                        album: albumName,
+                        artist: music.singer || 'Unknown Artist',
+                        artistId: artistId,
+                        isDir: true,
+                        coverArt: picUrl || albId,
+                        songCount: 1,
+                        duration: this.parseDuration(music.interval),
+                        created: new Date().toISOString(),
+                        playCount: 0,
+                    });
+                }
+            }
+        }
+        const allLocalAlbums = Array.from(allAlbumsMap.values());
+        // 4. 执行本地检索过滤
+        let matchedSongs = queryForFilter
+            ? allLocalSongs.filter(({ music }) => music.name.toLowerCase().includes(queryForFilter) ||
+                music.singer.toLowerCase().includes(queryForFilter) ||
+                (music.meta?.albumName || '').toLowerCase().includes(queryForFilter))
+            : allLocalSongs;
+        let matchedArtists = queryForFilter
+            ? allLocalArtists.filter(a => a.name.toLowerCase().includes(queryForFilter))
+            : allLocalArtists;
+        let matchedAlbums = queryForFilter
+            ? allLocalAlbums.filter(a => a.name.toLowerCase().includes(queryForFilter) || a.artist.toLowerCase().includes(queryForFilter))
+            : allLocalAlbums;
+        // 5. 分页参数解析
+        const artistCount = params.has('artistCount') ? parseInt(params.get('artistCount') || '20') : 20;
+        const artistOffset = parseInt(params.get('artistOffset') || '0');
+        const albumCount = params.has('albumCount') ? parseInt(params.get('albumCount') || '20') : 20;
+        const albumOffset = parseInt(params.get('albumOffset') || '0');
+        const songCount = params.has('songCount') ? parseInt(params.get('songCount') || '20') : 20;
+        const songOffset = parseInt(params.get('songOffset') || '0');
+        const requestedSongEnd = Math.max(0, songOffset) + Math.max(0, songCount);
+        // 6. 处理在线 API 搜索与模式融合
+        if (cleanQuery && songCount > 0) {
+            if (searchMode === 'force_online') {
+                const onlineResults = await this.fetchOnlineSearchSongs(cleanQuery, targetOnlineSources, requestedSongEnd);
+                matchedSongs = onlineResults;
+            }
+            else if (searchMode === 'merge') {
+                const onlineResults = await this.fetchOnlineSearchSongs(cleanQuery, targetOnlineSources, requestedSongEnd);
+                const existingIds = new Set(matchedSongs.map(s => s.music.id));
+                for (const item of onlineResults) {
+                    if (!existingIds.has(item.music.id)) {
+                        matchedSongs.push(item);
+                        existingIds.add(item.music.id);
+                    }
+                }
+            }
+            else if (searchMode === 'fallback') {
+                if (matchedSongs.length < requestedSongEnd) {
+                    const needed = requestedSongEnd - matchedSongs.length;
+                    const onlineResults = await this.fetchOnlineSearchSongs(cleanQuery, targetOnlineSources, needed);
+                    const existingIds = new Set(matchedSongs.map(s => s.music.id));
+                    for (const item of onlineResults) {
+                        if (!existingIds.has(item.music.id)) {
+                            matchedSongs.push(item);
+                            existingIds.add(item.music.id);
+                        }
+                    }
+                }
+            }
+        }
+        const pagedArtists = artistCount > 0 ? matchedArtists.slice(artistOffset, artistOffset + artistCount) : [];
+        const pagedAlbums = albumCount > 0 ? matchedAlbums.slice(albumOffset, albumOffset + albumCount) : [];
+        const pagedSongs = songCount > 0 ? matchedSongs.slice(songOffset, songOffset + songCount) : [];
+        const wrapKey = method === 'search' ? 'searchResult' : method === 'search2' ? 'searchResult2' : 'searchResult3';
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                [wrapKey]: {
+                    artist: pagedArtists,
+                    album: pagedAlbums,
+                    song: pagedSongs.map(({ music, listId }) => this.musicToSongFlat(music, listId, undefined, username)),
+                },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            [wrapKey]: {
+                children: {
+                    artist: pagedArtists.map(a => ({ attrs: a })),
+                    album: pagedAlbums.map(a => ({ attrs: a })),
+                    song: pagedSongs.map(({ music, listId }) => this.musicToSongXml(music, listId, undefined, username)),
+                },
+            },
+        }, format);
+    }
+    /**
+     * 按歌曲 id 从各音源在线回源取单曲信息（github/dev 移植自 feat/subsonic）
+     * 支持 tx / wy / kg / mg / kw / bd；xm 等无「按 id 取单曲」接口的源返回 null 降级。
+     */
+    async resolveMusicById(id) {
+        const idx = id.indexOf('_');
+        if (idx <= 0)
+            return null;
+        const source = id.slice(0, idx);
+        const songId = id.slice(idx + 1);
+        if (!songId)
+            return null;
+        try {
+            let music = null;
+            switch (source) {
+                case 'tx':
+                    music = await (0, musicInfo_js_1.default)(songId);
+                    break;
+                case 'wy': {
+                    // wy/musicInfo.js 返回的是 requestObj，真实数据在 .promise 里
+                    const raw = await (0, musicInfo_js_2.default)(songId).promise;
+                    if (raw) {
+                        music = {
+                            id: `wy_${songId}`,
+                            name: raw.name,
+                            singer: raw.artists ? raw.artists.map((a) => a.name).join('、') : '',
+                            source: 'wy',
+                            songmid: songId,
+                            interval: raw.dt ? String(Math.round(raw.dt / 1000)) : '0',
+                            img: raw.album?.picUrl ?? null,
+                            meta: {
+                                albumName: raw.album?.name,
+                                albumId: raw.album?.id,
+                                picUrl: raw.album?.picUrl,
+                            },
+                        };
+                    }
+                    break;
+                }
+                case 'kg':
+                    music = await (0, musicInfo_js_3.getMusicInfo)(songId);
+                    break;
+                case 'mg':
+                    music = await (0, musicInfo_js_4.getMusicInfo)(songId);
+                    break;
+                case 'kw': {
+                    // kw 有 getMusicInfo(songInfo)：www.kuwo.cn/api/www/music/musicInfo?mid=<songmid>
+                    // 返回 data 含 name / artist / album / pic / duration
+                    const info = await musicSdk.kw.getMusicInfo({ songmid: songId }).catch((e) => {
+                        this.logSourceError('kw', `getMusicInfo kw_${songId}`, e);
+                        return null;
+                    });
+                    if (info && info.name) {
+                        const artist = info.artist;
+                        const singer = Array.isArray(artist)
+                            ? artist.map((a) => a?.name || a).join('、')
+                            : (typeof artist === 'string' ? artist : (artist?.name || ''));
+                        music = {
+                            id: `kw_${songId}`,
+                            name: info.name,
+                            singer,
+                            source: 'kw',
+                            songmid: songId,
+                            interval: info.duration ? String(Math.round(Number(info.duration) > 100000 ? Number(info.duration) / 1000 : Number(info.duration))) : '0',
+                            img: info.pic || null,
+                            meta: {
+                                albumName: info.album || '',
+                                albumId: info.albumid ?? '',
+                                picUrl: info.pic || null,
+                            },
+                        };
+                    }
+                    break;
+                }
+                case 'bd': {
+                    // bd 有 getMusicInfo(songmid)：baidu.ting.song.getSongLink -> result.songinfo
+                    const info = await musicInfo_js_5.default.getMusicInfo(songId).promise.catch((e) => {
+                        this.logSourceError('bd', `getMusicInfo bd_${songId}`, e);
+                        return null;
+                    });
+                    if (info && info.title) {
+                        music = {
+                            id: `bd_${songId}`,
+                            name: info.title,
+                            singer: info.author || '',
+                            source: 'bd',
+                            songmid: songId,
+                            interval: info.file_duration ? String(Math.round(Number(info.file_duration))) : '0',
+                            img: info.pic_big || info.pic_small || null,
+                            meta: {
+                                albumName: info.album_title || '',
+                                albumId: info.album_id || '',
+                                picUrl: info.pic_big || info.pic_small || null,
+                            },
+                        };
+                    }
+                    break;
+                }
+                default:
+                    return null;
+            }
+            if (!music) {
+                console.log(`[Subsonic][trace] resolveMusicById ${id}: 回源未取到音乐信息(source=${source})`);
+                return null;
+            }
+            if (!music.source)
+                music.source = source;
+            if (!music.id)
+                music.id = `${source}_${music.songmid || music.songId || songId}`;
+            if (!music.songmid)
+                music.songmid = music.songId || songId;
+            if (!music.name) {
+                console.warn(`[Subsonic] resolveMusicById ${id} 取回结果缺少歌名，已放弃（不写入收藏）`);
+                return null;
+            }
+            console.log(`[Subsonic][trace] resolveMusicById ${id}: 成功取到 name=${music.name}, singer=${music.singer || '(空)'}`);
+            return music;
+        }
+        catch (e) {
+            this.logSourceError('resolveMusicById', `回源 ${id}`, e);
+            return null;
+        }
+    }
+    /** 统一元数据解析原语：本地/缓存 -> 在线回源；命中即回写 onlineSongCache */
+    async resolveSongMeta(username, id) {
+        const debug = !!global.lx.config['subsonic.enableDebug'];
+        if (debug)
+            console.log(`[Subsonic][trace] resolveSongMeta ${id}: 第1步 查持久化(歌单/专辑库) + 内存/磁盘 onlineSongCache`);
+        const found = await this.findMusicById(username, id);
+        if (found) {
+            this.cacheOnlineSong(found.music);
+            if (debug)
+                console.log(`[Subsonic][trace] resolveSongMeta ${id}: 第1步命中 listId=${found.listId}, name=${found.music.name || '(空)'}`);
+            return found;
+        }
+        if (debug)
+            console.log(`[Subsonic][trace] resolveSongMeta ${id}: 第1步未命中 -> 第2步 在线回源(network)`);
+        const resolved = await this.resolveMusicById(id);
+        if (resolved) {
+            this.cacheOnlineSong(resolved);
+            if (debug)
+                console.log(`[Subsonic][trace] resolveSongMeta ${id}: 第2步回源成功 name=${resolved.name}, 已写 onlineSongCache(内存+磁盘)`);
+            return { music: resolved, listId: 'online' };
+        }
+        if (debug)
+            console.log(`[Subsonic][trace] resolveSongMeta ${id}: 第2步回源失败 -> 返回 null(将在 stream 中降级为 Unknown)`);
+        return null;
+    }
+    /**
+     * star / unstar：歌曲 → 「我的收藏(love)」列表
+     * （github/dev 移植自 feat/subsonic：歌曲经 resolveSongMeta 解析，支持在线回源）
+     */
+    /** 用户维度 Subsonic 扩展元数据：星标专辑 / 星标歌手（委托模块级函数，便于 server.ts 反向同步共用） */
+    async getUserSubsonicMeta(username) {
+        return readSubsonicMeta(username);
+    }
+    async saveUserSubsonicMeta(username, meta) {
+        writeSubsonicMeta(username, meta);
+    }
+    /** 歌手名归一化：去空格 + 小写，用于跨大小写/音源匹配 */
+    normalizeArtistName(name) {
+        return (name || '').trim().toLowerCase();
+    }
+    /**
+     * 将歌手 id 解析为 (规范 art_ id, 歌手名) 两件套，供 star / getStarred 统一使用。
+     * - art_源_id：规范 id，直接返回 id；并尽量从本地歌手库反查名字（保证 unstar 时名字集合一致）。
+     * - artist_名字：兜底 id（歌曲/专辑映射在无 singerId 时生成），用 getSingerMid 寻址归一为 art_tx_mid；
+     *   寻址失败时退回原名（artist_名字），仍按名字匹配。
+     */
+    async resolveArtistKey(username, id) {
+        if (id.startsWith('art_')) {
+            let name;
+            try {
+                const libArtists = await this.getLibraryData(username, 'artists');
+                const found = libArtists.find((a) => `art_${a.source || 'wy'}_${a.id}` === id);
+                if (found?.name)
+                    name = found.name;
+            }
+            catch { /* 忽略，反查名字非必须 */ }
+            return { canonical: id, name };
+        }
+        if (id.startsWith('artist_')) {
+            const name = decodeURIComponent(id.slice(7));
+            try {
+                const mid = await (0, singer_1.getSingerMid)(name);
+                if (mid)
+                    return { canonical: `art_tx_${mid}`, name };
+            }
+            catch { /* 寻址失败，退回原名 */ }
+            return { canonical: id, name };
+        }
+        return { canonical: id, name: undefined };
+    }
+    async handleStar(res, username, params, format, isStar) {
+        // 收集 id / albumId / artistId（均允许逗号分隔的多个值）
+        const ids = [];
+        for (const key of ['id', 'albumId', 'artistId']) {
+            for (const value of params.getAll(key)) {
+                for (const one of value.split(',')) {
+                    const trimmed = one.trim();
+                    if (trimmed)
+                        ids.push(trimmed);
+                }
+            }
+        }
+        if (!ids.length)
+            return this.sendError(res, 10, 'Required parameter is missing: id', format);
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const meta = await this.getUserSubsonicMeta(username);
+        const starredAlbums = new Set(meta.starredAlbums);
+        const starredArtists = new Set(meta.starredArtists);
+        // 歌手名集合：用于跨音源 / artist_名字 兜底 id 的星标匹配
+        const starredArtistNames = new Set(meta.starredArtistNames);
+        const location = (global.lx.config['list.addMusicLocationType'] || 'bottom');
+        let loveChanged = false;
+        let metaChanged = false;
+        const action = isStar ? 'star' : 'unstar';
+        const debug = !!global.lx.config['subsonic.enableDebug'];
+        const debugLog = (msg) => { if (debug)
+            console.log(msg); };
+        // 原生媒体库收藏（用于双向同步：音流星标 -> 网页前端收藏）
+        const nativeArtists = await this.getLibraryData(username, 'artists');
+        const nativeAlbums = await this.getLibraryData(username, 'albums');
+        let nativeArtistsDirty = false;
+        let nativeAlbumsDirty = false;
+        for (const id of ids) {
+            if (id.startsWith('alb_')) {
+                isStar ? starredAlbums.add(id) : starredAlbums.delete(id);
+                metaChanged = true;
+                console.log(`[Subsonic] ${action} 专辑 ${id} (user=${username})`);
+                debugLog(`[Subsonic Debug] ${action} 专辑 ${id} -> ${isStar ? '已星标' : '已取消星标'} (user=${username})`);
+                // 双向同步：写回原生媒体库收藏
+                const m = id.match(/^alb_([a-zA-Z0-9]+)_(.+)$/);
+                if (m) {
+                    const source = m[1];
+                    const realId = m[2];
+                    if (isStar) {
+                        if (!nativeAlbums.some((a) => String(a.id) === realId && a.source === source)) {
+                            const { name, picUrl } = await this.resolveAlbumInfo(source, realId);
+                            if (name) {
+                                nativeAlbums.push({ id: realId, source, name, picUrl, artistName: '' });
+                                nativeAlbumsDirty = true;
+                            }
+                            else {
+                                console.warn(`[Subsonic] ${action} 专辑 ${id} 跳过原生同步：无法解析专辑名 (user=${username})`);
+                            }
+                        }
+                    }
+                    else {
+                        const idx = nativeAlbums.findIndex((a) => String(a.id) === realId && a.source === source);
+                        if (idx >= 0) {
+                            nativeAlbums.splice(idx, 1);
+                            nativeAlbumsDirty = true;
+                        }
+                    }
+                }
+                continue;
+            }
+            if (id.startsWith('art_') || id.startsWith('artist_')) {
+                // 统一解析：art_规范id 或 artist_名字兜底id -> 规范id + 歌手名
+                const { canonical, name } = await this.resolveArtistKey(username, id);
+                if (!canonical) {
+                    console.warn(`[Subsonic] ${action} 歌手 ${id} 跳过：无法解析歌手标识，未做任何改动 (user=${username})`);
+                    continue;
+                }
+                isStar ? starredArtists.add(canonical) : starredArtists.delete(canonical);
+                if (name) {
+                    const nk = this.normalizeArtistName(name);
+                    isStar ? starredArtistNames.add(nk) : starredArtistNames.delete(nk);
+                }
+                metaChanged = true;
+                console.log(`[Subsonic] ${action} 歌手 ${id} -> 规范=${canonical}${name ? `, 名=${name}` : ''} (user=${username})`);
+                debugLog(`[Subsonic Debug] ${action} 歌手 ${id} -> ${isStar ? '已星标' : '已取消星标'} (规范=${canonical}${name ? `, 名=${name}` : ''}) (user=${username})`);
+                // 双向同步：写回原生媒体库收藏（仅规范 art_ 前缀可映射回原生 id）
+                const m = canonical.match(/^art_([a-zA-Z0-9]+)_(.+)$/);
+                if (m) {
+                    const source = m[1];
+                    const realId = m[2];
+                    if (isStar) {
+                        if (!nativeArtists.some((a) => String(a.id) === realId && a.source === source)) {
+                            const picUrl = await this.resolveArtistPicUrl(source, realId);
+                            nativeArtists.push({ id: realId, source, name: name || '', picUrl });
+                            nativeArtistsDirty = true;
+                        }
+                    }
+                    else {
+                        const idx = nativeArtists.findIndex((a) => String(a.id) === realId && a.source === source);
+                        if (idx >= 0) {
+                            nativeArtists.splice(idx, 1);
+                            nativeArtistsDirty = true;
+                        }
+                    }
+                }
+                continue;
+            }
+            try {
+                const hit = await this.resolveSongMeta(username, id);
+                const resolved = hit?.music || null;
+                if (!resolved) {
+                    console.warn(`[Subsonic] ${action} 歌曲 ${id} 跳过：findMusicById 未命中 且 resolveMusicById 失败，未做任何改动 (user=${username})`);
+                    continue;
+                }
+                if (!this.loveIdSets.has(username))
+                    this.loveIdSets.set(username, new Set());
+                if (isStar) {
+                    await userSpace.listManage.listDataManage.listMusicAdd('love', [resolved], location);
+                    this.loveIdSets.get(username).add(resolved.id);
+                }
+                else {
+                    await userSpace.listManage.listDataManage.listMusicRemove('love', [resolved.id]);
+                    this.loveIdSets.get(username).delete(resolved.id);
+                }
+                const fromSource = hit.listId === 'online';
+                debugLog(`[Subsonic Debug] ${action} 歌曲 ${id} -> ${isStar ? '已加入' : '已移出'}我的收藏(love) 《${resolved.name}》${fromSource ? ' (从源取回)' : ''}(user=${username})`);
+                this.cacheOnlineSong(resolved);
+                loveChanged = true;
+            }
+            catch (e) {
+                console.error(`[Subsonic] ${action} song error (${id}):`, e);
+            }
+        }
+        if (metaChanged) {
+            await this.saveUserSubsonicMeta(username, {
+                starredAlbums: Array.from(starredAlbums),
+                starredArtists: Array.from(starredArtists),
+                starredArtistNames: Array.from(starredArtistNames),
+                ratings: meta.ratings,
+            });
+        }
+        if (nativeArtistsDirty)
+            await this.writeLibraryData(username, 'artists', nativeArtists);
+        if (nativeAlbumsDirty)
+            await this.writeLibraryData(username, 'albums', nativeAlbums);
+        if (loveChanged) {
+            try {
+                await userSpace.listManage.createSnapshot();
+            }
+            catch (e) {
+                console.error('[Subsonic] createSnapshot error:', e);
+            }
+        }
+        debugLog(`[Subsonic Debug] ${action} 完成: id 数=${ids.length}, 收藏变更=${loveChanged}, 星标元数据变更=${metaChanged} (user=${username})`);
+        return this.sendResponse(res, {}, format);
+    }
+    async handleGetStarred(res, username, format, isV2 = true) {
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        const meta = await this.getUserSubsonicMeta(username);
+        const starredAlbumSet = new Set(meta.starredAlbums);
+        const starredArtistSet = new Set(meta.starredArtists);
+        const starredArtistNameSet = new Set(meta.starredArtistNames);
+        // [汇总所有歌单歌曲]
+        const allSongsMap = new Map();
+        const collect = (list, listId) => {
+            for (const m of list) {
+                if (!allSongsMap.has(m.id)) {
+                    allSongsMap.set(m.id, { music: m, listId });
+                }
+            }
+        };
+        collect(listData.loveList, 'love');
+        // 只返回我的收藏里的歌，不再汇总其他歌单
+        const allSongs = Array.from(allSongsMap.values());
+        // [新增] 包含收藏的歌手和专辑
+        const libArtists = await this.getLibraryData(username, 'artists');
+        const libAlbums = await this.getLibraryData(username, 'albums');
+        // [已星标歌手] 优先来自本地歌手库匹配；库为空或歌手不在库中时，用已存名字兜底合成条目
+        const seenArtistNames = new Set();
+        const mappedArtists = [];
+        const pushArtist = (id, name) => {
+            const nk = this.normalizeArtistName(name);
+            if (seenArtistNames.has(nk))
+                return;
+            seenArtistNames.add(nk);
+            mappedArtists.push({ id, name, coverArt: id });
+        };
+        for (const a of libArtists) {
+            const canonical = `art_${a.source || 'wy'}_${a.id}`;
+            // 兼容：art_规范id 命中，或 artist_名字 兜底 / 跨音源按歌手名命中
+            if (starredArtistSet.has(canonical) || starredArtistNameSet.has(this.normalizeArtistName(a.name))) {
+                pushArtist(canonical, a.name);
+            }
+        }
+        // 兜底：已星标但根本不在本地歌手库（例如从歌曲点星标、库为空）的歌手，用名字合成
+        for (const name of meta.starredArtistNames) {
+            pushArtist(`artist_${encodeURIComponent(name)}`, name);
+        }
+        const mappedAlbums = libAlbums
+            .filter(a => starredAlbumSet.has(`alb_${(a.source || 'wy')}_${a.id}`))
+            .map(a => {
+            const source = a.source || 'wy';
+            const primarySinger = (a.artistName || '').split('、')[0] || 'Unknown Artist';
+            const artistId = a.singerId ? `art_${source}_${a.singerId}` : `artist_${primarySinger}`;
+            return {
+                id: `alb_${source}_${a.id}`,
+                name: a.name,
+                artist: a.artistName,
+                artistId: artistId,
+                coverArt: a.picUrl || `alb_${source}_${a.id}`
+            };
+        });
+        const wrapKey = isV2 ? 'starred2' : 'starred';
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                [wrapKey]: {
+                    song: allSongs.map(item => this.musicToSongFlat(item.music, item.listId, undefined, username)),
+                    album: mappedAlbums,
+                    artist: mappedArtists,
+                },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            [wrapKey]: {
+                children: {
+                    song: allSongs.map(item => this.musicToSongXml(item.music, item.listId, undefined, username)),
+                    album: mappedAlbums.map(a => ({ attrs: a })),
+                    artist: mappedArtists.map(a => ({ attrs: a })),
+                },
+            },
+        }, format);
+    }
+    async handleGetRandomSongs(res, username, params, format) {
+        const size = Math.min(parseInt(params.get('size') || '10'), 100);
+        const genreNameOrId = params.get('genre') || '';
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        const isGenreQuery = params.has('genre');
+        const rootKey = isGenreQuery ? 'songsByGenre' : 'randomSongs';
+        // [修改] 如果是流派发现，强制获取 100 首左右进行随机，忽略客户端的 size=10 限制
+        const fetchSize = isGenreQuery ? 100 : size;
+        // [新增] 如果带了 genre 参数，则优先从云端拉取该流派的歌曲
+        if (genreNameOrId) {
+            try {
+                let categoryId = genreNameOrId;
+                if (isNaN(parseInt(genreNameOrId))) {
+                    const genres = await (0, discovery_1.fetchGenres)();
+                    const target = genres.find(g => g.value === genreNameOrId);
+                    if (target)
+                        categoryId = target.id;
+                }
+                const cloudSongs = await (0, discovery_1.fetchSongsByGenre)(categoryId, fetchSize);
+                if (cloudSongs.length > 0) {
+                    const parentId = `genre_${genreNameOrId}`;
+                    const picked = cloudSongs.map((s) => ({ music: s, listId: parentId }));
+                    return this.renderRandomSongs(res, picked, format, rootKey, username);
+                }
+            }
+            catch (e) {
+                console.error(`[Subsonic] fetchSongsByGenre failed:`, e);
+            }
+        }
+        // 汇聚所有歌曲
+        const all = [];
+        const addAll = (musics, listId) => {
+            for (const m of musics)
+                all.push({ music: m, listId });
+        };
+        addAll(listData.loveList, 'love');
+        addAll(listData.defaultList, 'default');
+        for (const list of listData.userList)
+            addAll((list.list || []), list.id);
+        // Fisher-Yates 随机打乱，取前 size 条
+        for (let i = all.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [all[i], all[j]] = [all[j], all[i]];
+        }
+        const picked = all.slice(0, size);
+        return this.renderRandomSongs(res, picked, format, rootKey, username);
+    }
+    renderRandomSongs(res, picked, format, rootKey = 'randomSongs', username) {
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                [rootKey]: {
+                    song: picked.map(({ music, listId }) => this.musicToSongFlat(music, listId, undefined, username)),
+                },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            [rootKey]: {
+                children: {
+                    song: picked.map(({ music, listId }) => this.musicToSongXml(music, listId, undefined, username)),
+                },
+            },
+        }, format);
+    }
+    async handleGetSimilarSongs(res, username, params, format) {
+        const id = params.get('id');
+        const count = Math.min(parseInt(params.get('count') || '10'), 50);
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        // 找到目标歌曲，优先从同一列表里挑相似（同歌手），找不到则随机
+        const all = [];
+        const addAll = (musics, listId) => {
+            for (const m of musics)
+                all.push({ music: m, listId });
+        };
+        addAll(listData.loveList, 'love');
+        addAll(listData.defaultList, 'default');
+        for (const list of listData.userList)
+            addAll((list.list || []), list.id);
+        // 找目标歌曲
+        const target = id ? all.find(({ music }) => music.id === id) : null;
+        let candidates = all.filter(({ music }) => music.id !== id);
+        if (target) {
+            // 同歌手优先
+            const sameSinger = candidates.filter(({ music }) => music.singer === target.music.singer);
+            const others = candidates.filter(({ music }) => music.singer !== target.music.singer);
+            candidates = [...sameSinger, ...others];
+        }
+        // 打乱并取前 count
+        for (let i = candidates.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+        }
+        const picked = candidates.slice(0, count);
+        const wrapKey = 'similarSongs2';
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                [wrapKey]: {
+                    song: picked.map(({ music, listId }) => this.musicToSongFlat(music, listId, undefined, username)),
+                },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            [wrapKey]: {
+                children: {
+                    song: picked.map(({ music, listId }) => this.musicToSongXml(music, listId, undefined, username)),
+                },
+            },
+        }, format);
+    }
+    async handleStream(req, res, username, params, format) {
+        const id = params.get('id');
+        if (!id)
+            return this.sendError(res, 10, 'Required parameter is missing: id', format);
+        // 解析 source 和 songmid
+        let source = '';
+        let songmid = '';
+        if (id.includes('_')) {
+            const index = id.indexOf('_');
+            source = id.substring(0, index);
+            songmid = id.substring(index + 1);
+        }
+        else {
+            source = id.split('-')[0] || '';
+            songmid = id;
+        }
+        try {
+            const maxBitrate = parseInt(params.get('maxBitrate') || '0');
+            let quality = '128k';
+            if (maxBitrate === 0 || maxBitrate >= 320) {
+                quality = 'flac'; // 优先请求最高音质，SDK 会自动降级
+            }
+            else if (maxBitrate > 128) {
+                quality = '320k';
+            }
+            // [新增] 处理电台流: 随机取一首歌播放
+            if (id.startsWith('radio_tx_')) {
+                const radioId = id.replace('radio_tx_', '');
+                // console.log(`[Subsonic] Radio stream requested: ${id}`)
+                const songs = await (0, discovery_1.fetchRadioSongs)(radioId);
+                // console.log(`[Subsonic] Radio ${id} fetched ${songs?.length || 0} songs`)
+                if (songs && songs.length > 0) {
+                    // 随机取一首，提升电台体验
+                    const s = songs[Math.floor(Math.random() * songs.length)];
+                    const songmid = s.mid || s.songmid;
+                    // console.log(`[Subsonic] Radio ${id} picked song: ${s.name || s.songname} (${songmid})`)
+                    const musicInfo = { source: 'tx', songmid, id: `tx_${songmid}`, meta: { songId: songmid } };
+                    const result = await (0, userApi_1.callUserApiGetMusicUrl)('tx', musicInfo, quality, username);
+                    if (result && result.url) {
+                        if (global.lx.config['subsonic.cacheOnPlay'] && username) {
+                            const songKey = `tx_${songmid}_${quality}`;
+                            const previous = this.subsonicActiveTasks.get(username);
+                            if (previous && previous.songKey !== songKey) {
+                                console.log(`[Subsonic] User ${username} switched radio track, aborting previous background cache task: ${previous.songKey}`);
+                                previous.controller.abort();
+                            }
+                            const controller = new AbortController();
+                            this.subsonicActiveTasks.set(username, { songKey, controller });
+                            void (0, fileCache_1.downloadAndCache)(musicInfo, result.url, quality, username, controller.signal, false, true, true, {
+                                requestedSource: 'tx',
+                                downloadSource: 'tx',
+                                sourceName: 'tx',
+                            }).catch((err) => {
+                                if (err?.message !== 'Aborted') {
+                                    console.error('[Subsonic] radio cacheOnPlay failed:', err?.message || err);
+                                }
+                            }).finally(() => {
+                                if (this.subsonicActiveTasks.get(username)?.controller === controller) {
+                                    this.subsonicActiveTasks.delete(username);
+                                }
+                            });
+                        }
+                        res.writeHead(302, { Location: result.url });
+                        return res.end();
+                    }
+                    else {
+                        console.error(`[Subsonic] Radio ${id} failed to resolve music URL`);
+                    }
+                }
+                else {
+                    console.warn(`[Subsonic] Radio ${id} returned empty song list`);
+                }
+                return this.sendError(res, 0, 'Could not resolve radio track', format);
+            }
+            // [新增] 本地缓存优先播放：受 subsonic.playCacheFirst 开关控制(默认开启)，若该歌曲已存在于用户的 cache 或 music 目录，直接流式回传本地文件，避免请求源站
+            if (global.lx.config['subsonic.playCacheFirst'] !== false) {
+                const cacheCheck = (0, fileCache_1.checkCache)({ source, songmid, id, quality }, username, false);
+                if (cacheCheck.exists && cacheCheck.filename) {
+                    console.log(`[Subsonic] Stream hit local cache for ${id} (${cacheCheck.quality || quality}): ${cacheCheck.filename} (${cacheCheck.folder})`);
+                    return (0, fileCache_1.serveCacheFile)(req, res, cacheCheck.filename, username);
+                }
+            }
+            // [修复] 像 star 一样：先用 findMusicById 查本地/缓存，查不到再在线回源补全真实元数据
+            // （否则仅用 Subsonic 的不完整信息会导致缓存文件名为 Unknown - Unknown - ...）
+            let musicInfo;
+            try {
+                const hit = await this.resolveSongMeta(username, id);
+                musicInfo = hit?.music || null;
+            }
+            catch (e) {
+                this.logSourceError('resolveSongMeta', `stream ${id}`, e);
+                musicInfo = null;
+            }
+            if (!musicInfo) {
+                musicInfo = { source, songmid, id, meta: { songId: songmid } };
+            }
+            // [诊断] 打印回源结果与客户端的歌曲元数据参数，便于排查 kw 等源仍为 Unknown 的问题
+            if (global.lx.config['subsonic.enableDebug']) {
+                console.log(`[Subsonic] stream resolve ${id}: name=${musicInfo.name || '(空)'} singer=${musicInfo.singer || '(空)'} album=${musicInfo.meta?.albumName || '(空)'}`);
+                console.log(`[Subsonic] stream params: name=${params.get('name') || ''} title=${params.get('title') || ''} artist=${params.get('artist') || ''} album=${params.get('album') || ''}`);
+            }
+            // [修复] 客户端（音流）通常在 stream 请求里附带真实元数据（name/artist/album），
+            // 用于补充 Subsonic 自身不完整的歌曲信息（kw 等无 getMusicInfo 的源尤其依赖它）
+            if (!musicInfo.name) {
+                const cName = params.get('name') || params.get('title') || '';
+                if (cName) {
+                    musicInfo = {
+                        ...musicInfo,
+                        name: cName,
+                        singer: params.get('artist') || musicInfo.singer || '',
+                        source,
+                        songmid,
+                        id,
+                        img: musicInfo.img || null,
+                        meta: {
+                            ...(musicInfo.meta || {}),
+                            songId: songmid,
+                            albumName: params.get('album') || musicInfo.meta?.albumName || '',
+                        },
+                    };
+                    console.log(`[Subsonic] stream ${id}: 已用客户端参数补全 name=${cName}`);
+                    // [修复] 把客户端补全后的结果也落盘，否则重启后还得再靠客户端参数补全一次，
+                    // 一旦客户端未带参数就会再次缺失
+                    this.cacheOnlineSong(musicInfo);
+                }
+            }
+            let hash = musicInfo.hash || musicInfo.meta?.hash || '';
+            if (source === 'kg' && !hash) {
+                try {
+                    const title = musicInfo.name || params.get('title') || params.get('name') || songmid;
+                    const searchRes = await musicSdk.kg.musicSearch.search(title, 1, 5);
+                    const match = searchRes?.list?.find((item) => String(item.songmid || item.id || item.Audioid) === songmid) || searchRes?.list?.[0];
+                    if (match) {
+                        hash = match.hash || match.meta?.hash || match.types?.[0]?.hash || '';
+                    }
+                }
+                catch (e) {
+                    this.logSourceError('kg-hash', `auto-resolve hash kw_${songmid}`, e);
+                }
+            }
+            musicInfo = {
+                ...musicInfo,
+                source,
+                songmid,
+                id,
+                ...(hash ? { hash } : {}),
+                meta: {
+                    ...(musicInfo.meta || {}),
+                    songId: songmid,
+                    ...(hash ? { hash } : {}),
+                }
+            };
+            const result = await (0, userApi_1.callUserApiGetMusicUrl)(source, musicInfo, quality, username);
+            if (result && result.url) {
+                // [诊断] 打印缓存触发决策，便于排查 Subsonic 播放不缓存问题
+                console.log(`[Subsonic] stream cacheOnPlay: enabled=${global.lx.config['subsonic.cacheOnPlay']} user=${username} url=${String(result.url).slice(0, 90)}`);
+                // [新增] 播放时触发服务器缓存保存：受 subsonic.cacheOnPlay 开关控制
+                // 后台落盘到该用户缓存目录；已在播放的上一首若未下载完成，在切换新歌曲时自动 abort 中断，避免连切刷歌堆积带宽
+                if (global.lx.config['subsonic.cacheOnPlay'] && username) {
+                    const songKey = `${source}_${songmid}_${quality}`;
+                    const previous = this.subsonicActiveTasks.get(username);
+                    if (previous && previous.songKey !== songKey) {
+                        console.log(`[Subsonic] User ${username} switched track, aborting previous background cache task: ${previous.songKey}`);
+                        previous.controller.abort();
+                    }
+                    const controller = new AbortController();
+                    this.subsonicActiveTasks.set(username, { songKey, controller });
+                    void (0, fileCache_1.downloadAndCache)(musicInfo, result.url, quality, username, controller.signal, false, true, true, {
+                        requestedSource: source,
+                        downloadSource: source,
+                        sourceName: source,
+                    }).then(() => {
+                        console.log(`[Subsonic] cacheOnPlay: cache task done for ${musicInfo.id} (${quality})`);
+                    }).catch((err) => {
+                        if (err?.message !== 'Aborted') {
+                            console.error('[Subsonic] cacheOnPlay failed:', err?.message || err);
+                        }
+                    }).finally(() => {
+                        if (this.subsonicActiveTasks.get(username)?.controller === controller) {
+                            this.subsonicActiveTasks.delete(username);
+                        }
+                    });
+                }
+                res.writeHead(302, { Location: result.url });
+                res.end();
+            }
+            else {
+                return this.sendError(res, 0, 'Could not resolve music URL', format);
+            }
+        }
+        catch (err) {
+            return this.sendError(res, 0, err.message || 'Stream error', format);
+        }
+    }
+    async handleGetCoverArt(req, res, username, params, format) {
+        let id = params.get('id');
+        if (!id) {
+            res.writeHead(204);
+            return res.end();
+        }
+        try {
+            // 0. 剥离前缀 (al-, ar-, tr-, sg-, mg-) 并处理 URL
+            id = id.replace(/^(al-|ar-|tr-|sg-|mg-)/, '');
+            if (id === 'logo') {
+                const logoPath = path_1.default.join(global.lx.staticPath, 'music/assets/logo.svg');
+                if (fs_1.default.existsSync(logoPath)) {
+                    res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+                    return fs_1.default.createReadStream(logoPath).pipe(res);
+                }
+            }
+            // 处理作为 coverArt 传入的直链 URL（客户端可能对其做 percent-encode 后再作为 id 传回）
+            let coverUrl = id;
+            if (!coverUrl.startsWith('http') && (coverUrl.startsWith('https%3A') || coverUrl.startsWith('http%3A'))) {
+                try {
+                    coverUrl = decodeURIComponent(coverUrl);
+                }
+                catch { /* 解码失败保持原值 */ }
+            }
+            if (coverUrl.startsWith('http'))
+                return (0, coverProxy_1.proxyCoverImage)(res, coverUrl);
+            // [新增] 兼容逻辑：处理不规范的 ID（如原始 albumMid）
+            if (!id.includes('_')) {
+                const userSpace = (0, user_1.getUserSpace)(username);
+                const listData = await userSpace.listManage.getListData();
+                const allMusics = [...listData.loveList, ...listData.defaultList, ...listData.userList.flatMap(l => (l.list || []))];
+                const matched = allMusics.find((m) => m.meta?.albumId === id || m.meta?.albumMid === id);
+                if (matched) {
+                    const picUrl = matched.meta?.picUrl || matched.img;
+                    if (picUrl) {
+                        return (0, coverProxy_1.proxyCoverImage)(res, picUrl);
+                    }
+                }
+            }
+            // 辅助：通过 SDK 获取封面（带超时保护）
+            const getPicViaSDK = async (music) => {
+                const source = music.source;
+                const sdk = musicSdk[source];
+                if (!sdk?.getPic) {
+                    return null;
+                }
+                try {
+                    const meta = music.meta || {};
+                    // 剥离 source 前缀：'wy_604841' -> '604841'，确保平台 SDK 能识别
+                    const rawSongId = music.id.includes('_')
+                        ? music.id.split('_').slice(1).join('_')
+                        : music.id;
+                    const songInfo = {
+                        ...meta,
+                        id: music.id,
+                        name: music.name,
+                        singer: music.singer,
+                        source,
+                        songmid: meta.songId || rawSongId,
+                    };
+                    const picUrl = await Promise.race([
+                        sdk.getPic(songInfo),
+                        new Promise(resolve => setTimeout(() => resolve(null), 5000)),
+                    ]);
+                    return typeof picUrl === 'string' && picUrl.startsWith('http') ? picUrl : null;
+                }
+                catch (e) {
+                    console.error(`[CoverArt] SDK getPic error:`, e?.message);
+                    return null;
+                }
+            };
+            // 1. 优先尝试从内存预缓存中获取 (用于 SDK 动态抓取的歌曲)
+            if (this.songPicUrlCache.has(id)) {
+                const cachedUrl = this.songPicUrlCache.get(id);
+                if (cachedUrl) {
+                    return (0, coverProxy_1.proxyCoverImage)(res, cachedUrl);
+                }
+            }
+            // 2. 尝试从本地歌单库中查找
+            let found = await this.findMusicById(username, id).catch(() => null);
+            // [新增] 如果普通歌单没找到，去收藏专辑里找这首歌
+            if (!found && id.includes('_')) {
+                const libAlbums = await this.getLibraryData(username, 'albums');
+                for (const alb of libAlbums) {
+                    const song = (alb.list || []).find((s) => `${s.source}_${s.songmid || s.songId}` === id);
+                    if (song) {
+                        const source = alb.source || 'wy';
+                        found = { music: { ...song, id, meta: { picUrl: song.img || song.meta?.picUrl } }, listId: `alb_${source}_${alb.id}` };
+                        break;
+                    }
+                }
+            }
+            if (found) {
+                const picUrl = found.music?.meta?.picUrl || found.music?.img || null;
+                if (picUrl)
+                    return (0, coverProxy_1.proxyCoverImage)(res, picUrl);
+                const sdkPic = await getPicViaSDK(found.music);
+                if (sdkPic)
+                    return (0, coverProxy_1.proxyCoverImage)(res, sdkPic);
+            }
+            else if (id.startsWith('alb_')) {
+                // [修复] 专辑封面：绝不能直接调歌曲 getPic（专辑对象无 songmid/hash，会读取 undefined.length 崩溃）。
+                // 优先用本地专辑库的 picUrl；没有则落到函数末尾的 204 兜底。
+                const parts = id.split('_');
+                const source = parts[1];
+                const realId = parts.slice(2).join('_');
+                try {
+                    const libAlbums = await this.getLibraryData(username, 'albums');
+                    const alb = libAlbums.find((a) => `${(a.source || 'wy')}_${a.id}` === id || String(a.id) === realId);
+                    const localPic = alb?.picUrl || alb?.img;
+                    if (localPic)
+                        return (0, coverProxy_1.proxyCoverImage)(res, localPic);
+                }
+                catch (e) {
+                    console.error(`[CoverArt] read album library failed for ${id}:`, e?.message);
+                }
+                // [修复] 云端/推荐专辑不进本地库，按专辑 mid 直接构造封面 URL（修复首页推荐专辑缺图）
+                const cloudCover = this.buildAlbumCoverUrl(source, realId);
+                if (cloudCover)
+                    return (0, coverProxy_1.proxyCoverImage)(res, cloudCover);
+                // [补齐] NetEase(wy) 等源的专辑封面无法仅凭 id 拼 URL，走 SDK 取专辑详情拿真实 picUrl（带 In-flight 复用）
+                const getAlbumSongs = musicSdk[source]?.extendDetail?.getAlbumSongs;
+                if (getAlbumSongs) {
+                    try {
+                        let fetchPromise = this.albumSongFetchInFlight.get(id);
+                        if (!fetchPromise) {
+                            fetchPromise = (async () => {
+                                try {
+                                    const data = await getAlbumSongs(realId);
+                                    const firstSong = (data?.list || [])[0];
+                                    const cover = firstSong?.img || firstSong?.picUrl || firstSong?.meta?.picUrl || firstSong?.al?.picUrl;
+                                    return cover || null;
+                                }
+                                catch (e) {
+                                    console.error(`[CoverArt] SDK getAlbumSongs failed for ${id}:`, e?.message);
+                                    return null;
+                                }
+                                finally {
+                                    this.albumSongFetchInFlight.delete(id);
+                                }
+                            })();
+                            this.albumSongFetchInFlight.set(id, fetchPromise);
+                        }
+                        const albumCover = await fetchPromise;
+                        if (albumCover) {
+                            this.setSongPicUrl(id, albumCover);
+                            return (0, coverProxy_1.proxyCoverImage)(res, albumCover);
+                        }
+                    }
+                    catch (e) {
+                        console.error(`[CoverArt] resolve albumCover failed for ${id}:`, e?.message);
+                    }
+                }
+                // 注：musicSdk 各源未统一暴露专辑封面接口（kg 的 getAlbumInfo 未挂到 SDK 对象上），
+                // 此处不再强行调用歌曲 getPic，避免崩溃；专辑库有 picUrl 或可按 mid 构造时才返回封面。
+            }
+            else if (id.startsWith('art_')) {
+                // [修改] 歌手封面逻辑优化：先查本地库，再查歌手图助手
+                const parts = id.split('_');
+                const source = parts[1];
+                const realId = parts.slice(2).join('_');
+                // 1. 尝试从本地歌手库 (artists.json) 获取 picUrl
+                const libArtists = await this.getLibraryData(username, 'artists');
+                const localArt = libArtists.find(a => (a.source === source && a.id === realId) || a.name === realId);
+                if (localArt && (localArt.picUrl || localArt.img)) {
+                    return (0, coverProxy_1.proxyCoverImage)(res, localArt.picUrl || localArt.img);
+                }
+                // 2. 兜底尝试使用歌手名搜索照片
+                const cover = await (0, singer_1.getSingerPic)(localArt?.name || realId);
+                if (cover)
+                    return (0, coverProxy_1.proxyCoverImage)(res, cover);
+            }
+            else if (id.includes('_')) {
+                // 1.5 歌曲不在已加载的库中，解析 ID 直接尝试 SDK
+                const parts = id.split('_');
+                // 排除特殊前缀，获取真正的 source
+                const source = ['alb', 'art', 'hot-songs'].includes(parts[0]) ? parts[1] : parts[0];
+                const songmid = ['alb', 'art', 'hot-songs'].includes(parts[0]) ? parts.slice(2).join('_') : parts.slice(1).join('_');
+                if (musicSdk[source]) {
+                    const music = { source, id, songmid, name: '', singer: '' };
+                    const sdkPic = await getPicViaSDK(music);
+                    if (sdkPic)
+                        return (0, coverProxy_1.proxyCoverImage)(res, sdkPic);
+                }
+            }
+            // 2. 尝试作为歌手 ID 处理 (artist_歌手名)
+            if (id.startsWith('artist_')) {
+                const singerName = id.slice(7);
+                if (singerName) {
+                    const cover = await (0, singer_1.getSingerPic)(singerName);
+                    if (cover)
+                        return (0, coverProxy_1.proxyCoverImage)(res, cover);
+                }
+            }
+            // 3. 尝试作为歌单 ID 处理
+            const userSpace = (0, user_1.getUserSpace)(username);
+            const listData = await userSpace.listManage.getListData();
+            let listMusics = [];
+            if (id === 'love') {
+                listMusics = listData.loveList;
+            }
+            else if (id === 'default') {
+                listMusics = listData.defaultList;
+            }
+            else {
+                const list = listData.userList.find((l) => l.id === id);
+                if (list) {
+                    if (list.Album)
+                        return (0, coverProxy_1.proxyCoverImage)(res, list.Album);
+                    listMusics = (list.list || []);
+                }
+            }
+            if (listMusics.length > 0) {
+                for (const music of listMusics) {
+                    const picUrl = music?.meta?.picUrl || music?.img;
+                    if (picUrl)
+                        return (0, coverProxy_1.proxyCoverImage)(res, picUrl);
+                }
+                const sdkPic = await getPicViaSDK(listMusics[0]);
+                if (sdkPic)
+                    return (0, coverProxy_1.proxyCoverImage)(res, sdkPic);
+            }
+            // 4. 兜底
+            res.writeHead(204);
+            res.end();
+        }
+        catch (e) {
+            console.error('[Subsonic] handleGetCoverArt error:', e?.message || e);
+            if (!res.headersSent)
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+            if (!res.writableEnded)
+                res.end(JSON.stringify({ error: 'cover art error' }));
+        }
+    }
+    async handleGetTopSongs(res, username, params, format) {
+        const artist = (params.get('artist') || '').trim();
+        const id = params.get('id'); // OpenSubsonic 扩展参数
+        const count = Math.min(parseInt(params.get('count') || '50'), 500);
+        let picked = [];
+        // 1. 尝试从本地歌手库 (artists.json) 匹配
+        const libArtists = await this.getLibraryData(username, 'artists');
+        // 匹配逻辑增强：支持 ID 匹配或模糊名字匹配
+        const artistEntry = libArtists.find(a => (id && `art_${a.source || 'wy'}_${a.id}` === id) ||
+            (artist && (a.name.toLowerCase().includes(artist.toLowerCase()) || artist.toLowerCase().includes(a.name.toLowerCase()))));
+        if (artistEntry && artistEntry.source && artistEntry.id && musicSdk[artistEntry.source]?.extendDetail) {
+            try {
+                const source = artistEntry.source;
+                const MAX_PAGES = 5;
+                const PAGE_SIZE = 100;
+                let all = [];
+                for (let p = 1; p <= MAX_PAGES; p++) {
+                    const data = await musicSdk[source].extendDetail.getArtistSongs(artistEntry.id, p, PAGE_SIZE, 'hot');
+                    const pageList = data.list || [];
+                    all = all.concat(pageList);
+                    if (pageList.length < PAGE_SIZE)
+                        break;
+                }
+                picked = all.map((s) => ({
+                    music: { ...s, id: `${source}_${s.songmid || s.songId}` },
+                    listId: `art_${source}_${artistEntry.id}`
+                }));
+            }
+            catch (e) {
+                console.error(`[Subsonic] getTopSongs SDK error for ${artist || id}:`, e);
+            }
+        }
+        // 2. 兜底逻辑：如果在 SDK/库里没找到，搜索本地所有播放列表
+        if (picked.length === 0) {
+            const userSpace = (0, user_1.getUserSpace)(username);
+            const listData = await userSpace.listManage.getListData();
+            const all = [];
+            const addAll = (musics, listId) => {
+                for (const m of musics) {
+                    if (!artist || m.singer.toLowerCase().includes(artist.toLowerCase())) {
+                        all.push({ music: m, listId });
+                    }
+                }
+            };
+            addAll(listData.loveList, 'love');
+            addAll(listData.defaultList, 'default');
+            for (const list of listData.userList)
+                addAll((list.list || []), list.id);
+            picked = all.slice(0, count);
+        }
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                topSongs: {
+                    song: picked.map(({ music, listId }) => this.musicToSongFlat(music, listId, undefined, username)),
+                },
+            }, format);
+        }
+        return this.sendResponse(res, {
+            topSongs: {
+                children: {
+                    song: picked.map(({ music, listId }) => this.musicToSongXml(music, listId, undefined, username)),
+                },
+            },
+        }, format);
+    }
+    /**
+     * 按平台 + 专辑 mid 直接构造封面 URL（用于云端/推荐专辑，未进本地库）
+     */
+    buildAlbumCoverUrl(source, mid) {
+        if (!mid)
+            return null;
+        switch (source) {
+            case 'tx':
+                return `https://y.gtimg.cn/music/photo_new/T002R300x300M000${mid}.jpg?max_age=2592000`;
+            default:
+                return null;
+        }
+    }
+    handleGetOpenSubsonicExtensions(res, format) {
+        const extensions = [
+            { name: 'formPost', versions: [1] },
+            { name: 'coverArtScaling', versions: [1] },
+            { name: 'thumbnails', versions: [1] },
+            { name: 'lyrics', versions: [1] }
+        ];
+        const data = { openSubsonicExtensions: format === 'json' ? extensions : { children: { extension: extensions.map(e => ({ attrs: e })) } } };
+        return this.sendResponse(res, data, format);
+    }
+    async handleGetLyrics(res, username, params, format) {
+        const artist = params.get('artist') || '';
+        const title = params.get('title') || '';
+        const id = params.get('id');
+        // [新增] 如果请求中带有 ID，优先使用 ID 通过 SDK 获取歌词
+        if (id) {
+            return this.handleGetLyricsBySongId(res, username, params, format);
+        }
+        // 尝试通过歌手和标题反查歌曲 ID
+        const userSpace = (0, user_1.getUserSpace)(username);
+        const listData = await userSpace.listManage.getListData();
+        const all = [
+            ...listData.loveList,
+            ...listData.defaultList,
+            ...listData.userList.flatMap(l => (l.list || []))
+        ];
+        const found = all.find(m => m.name.toLowerCase() === title.toLowerCase() &&
+            m.singer.toLowerCase().includes(artist.toLowerCase()));
+        if (found) {
+            params.set('id', found.id);
+            return this.handleGetLyricsBySongId(res, username, params, format);
+        }
+        const lyricsData = {
+            artist: artist,
+            title: title,
+            value: 'Lyrics not found in library. Please use getLyricsBySongId with a valid song ID.'
+        };
+        if (format === 'json') {
+            return this.sendResponse(res, { lyrics: lyricsData }, format);
+        }
+        return this.sendResponse(res, {
+            lyrics: {
+                attrs: { artist: lyricsData.artist, title: lyricsData.title },
+                children: lyricsData.value
+            }
+        }, format);
+    }
+    /**
+     * 将原文 (lyric) 与翻译 (tlyric) 按时间戳交织合并为双行 LRC 格式
+     * 排列顺序：最上方为原文 ➔ 最下方为翻译
+     */
+    buildMergedLrc(rawLrc, transLrc) {
+        const isTransEnabled = global.lx.config['subsonic.lyricTranslation'] !== false;
+        const effectiveTransLrc = isTransEnabled ? transLrc : '';
+        if (!effectiveTransLrc)
+            return rawLrc || '';
+        const parseLrcMap = (lrc) => {
+            const map = new Map();
+            if (!lrc)
+                return map;
+            const lines = lrc.split(/\r?\n/);
+            const timeRegex = /\[(\d{1,3}:\d{1,2}(?:\.\d{1,3})?)\]/g;
+            for (const line of lines) {
+                const text = line.replace(/\[\d{1,3}:\d{1,2}(?:\.\d{1,3})?\]/g, '').trim();
+                if (!text)
+                    continue;
+                timeRegex.lastIndex = 0;
+                const matches = [...line.matchAll(timeRegex)];
+                for (const m of matches) {
+                    const t = m[1];
+                    if (!map.has(t))
+                        map.set(t, []);
+                    map.get(t).push(text);
+                }
+            }
+            return map;
+        };
+        const rawMap = parseLrcMap(rawLrc);
+        const transMap = parseLrcMap(effectiveTransLrc || '');
+        // 收集所有出现的时间戳标签
+        const allTimeLabels = Array.from(new Set([...rawMap.keys(), ...transMap.keys()]));
+        // 辅助时间戳转毫秒排序
+        const labelToMs = (label) => {
+            const parts = label.split(':');
+            const secParts = (parts[1] || '0').split('.');
+            const min = parseInt(parts[0]) || 0;
+            const sec = parseInt(secParts[0]) || 0;
+            const ms = parseInt((secParts[1] || '0').padEnd(3, '0')) || 0;
+            return min * 60000 + sec * 1000 + ms;
+        };
+        allTimeLabels.sort((a, b) => labelToMs(a) - labelToMs(b));
+        const outLines = [];
+        for (const t of allTimeLabels) {
+            const raws = rawMap.get(t) || [];
+            const transs = transMap.get(t) || [];
+            // 排列顺序：原文在上，翻译在下
+            for (const r of raws)
+                outLines.push(`[${t}]${r}`);
+            for (const tr of transs)
+                outLines.push(`[${t}]${tr}`);
+        }
+        return outLines.join('\n');
+    }
+    async handleGetLyricsBySongId(res, username, params, format) {
+        const id = params.get('id');
+        if (!id)
+            return this.sendError(res, 10, 'Required parameter is missing: id', format);
+        // 解析 source 和 songmid
+        let source = '';
+        let songmid = '';
+        if (id.includes('_')) {
+            const index = id.indexOf('_');
+            source = id.substring(0, index);
+            songmid = id.substring(index + 1);
+        }
+        if (!source || !musicSdk[source]) {
+            return this.sendError(res, 70, 'Song or source not supported: ' + id, format);
+        }
+        try {
+            // 尝试查找歌曲详情以丰富歌词请求元数据 (KG/MG 特别需要)
+            const found = await this.findMusicById(username, id);
+            const musicMeta = found?.music || {
+                id,
+                source,
+                songmid,
+                name: params.get('title') || '',
+                singer: params.get('artist') || ''
+            };
+            let hash = musicMeta.hash || musicMeta.meta?.hash || '';
+            if (source === 'kg' && !hash) {
+                try {
+                    const title = musicMeta.name || params.get('title') || params.get('name') || songmid;
+                    const searchRes = await musicSdk.kg.musicSearch.search(title, 1, 5);
+                    const match = searchRes?.list?.find((item) => String(item.songmid || item.id || item.Audioid) === songmid) || searchRes?.list?.[0];
+                    if (match) {
+                        hash = match.hash || match.meta?.hash || match.types?.[0]?.hash || '';
+                    }
+                }
+                catch (e) {
+                    console.error('[Subsonic] Auto-resolve kg hash for lyric failed:', e);
+                }
+            }
+            const songInfo = {
+                songmid: musicMeta.songmid || songmid,
+                name: musicMeta.name || '',
+                singer: musicMeta.singer || '',
+                hash: hash,
+                interval: musicMeta.interval || '',
+                _interval: musicMeta._interval || musicMeta.interval || '',
+                copyrightId: musicMeta.copyrightId || musicMeta.meta?.copyrightId || '',
+                albumId: musicMeta.albumId || musicMeta.meta?.albumId || '',
+                lrcUrl: musicMeta.lrcUrl || musicMeta.meta?.lrcUrl || '',
+            };
+            const requestObj = musicSdk[source].getLyric(songInfo);
+            const lyricInfo = await requestObj.promise;
+            const rawLrc = lyricInfo.lyric || '';
+            const transLrc = lyricInfo.tlyric || '';
+            const mergedLrc = this.buildMergedLrc(rawLrc, transLrc);
+            // 转换结构化歌词
+            const lines = this.parseLrc(rawLrc);
+            const tlines = transLrc ? this.parseLrc(transLrc) : [];
+            const structuredLyrics = [
+                {
+                    lang: 'und',
+                    synced: lines.some(l => l.start !== undefined),
+                    line: lines,
+                    displayArtist: musicMeta.singer,
+                    displayTitle: musicMeta.name,
+                }
+            ];
+            if (tlines.length > 0) {
+                structuredLyrics.push({
+                    lang: 'zh',
+                    synced: tlines.some(l => l.start !== undefined),
+                    line: tlines,
+                    displayArtist: musicMeta.singer,
+                    displayTitle: musicMeta.name,
+                });
+            }
+            if (format === 'json') {
+                return this.sendResponse(res, {
+                    lyricsList: { structuredLyrics },
+                    // 兼容标准 Subsonic getLyrics (同频时间戳双行/多行歌词)
+                    lyrics: {
+                        artist: musicMeta.singer,
+                        title: musicMeta.name,
+                        value: mergedLrc
+                    }
+                }, format);
+            }
+            // XML 模式逻辑
+            return this.sendResponse(res, {
+                lyrics: {
+                    attrs: { artist: musicMeta.singer, title: musicMeta.name },
+                    children: mergedLrc
+                },
+            }, format);
+        }
+        catch (err) {
+            console.error(`[Subsonic] Lyric fetch error:`, err);
+            return this.sendError(res, 0, 'Failed to fetch lyrics: ' + err.message, format);
+        }
+    }
+    parseLrc(lrc) {
+        if (!lrc)
+            return [];
+        const lines = lrc.split(/\r?\n/);
+        const result = [];
+        const timeRegex = /\[(\d+):(\d+)\.(\d+)\]/g;
+        for (const line of lines) {
+            const text = line.replace(/\[\d+:\d+\.\d+\]/g, '').trim();
+            if (!text && line.includes(']'))
+                continue;
+            timeRegex.lastIndex = 0; // 重置正则索引
+            const matches = [...line.matchAll(timeRegex)];
+            if (matches.length > 0) {
+                for (const match of matches) {
+                    const minutes = parseInt(match[1]);
+                    const seconds = parseInt(match[2]);
+                    const msStr = match[3].padEnd(3, '0');
+                    const ms = parseInt(msStr);
+                    const startTime = minutes * 60000 + seconds * 1000 + ms;
+                    result.push({ value: text, start: startTime });
+                }
+            }
+            else if (text) {
+                result.push({ value: text });
+            }
+        }
+        return result.sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
+    }
+    async handleGetUser(res, username, params, format) {
+        const userInfo = {
+            username,
+            email: '',
+            scrobblingEnabled: false,
+            adminRole: true,
+            settingsRole: true,
+            downloadRole: true,
+            uploadRole: false,
+            playlistRole: true,
+            coverArtRole: true,
+            commentRole: false,
+            podcastRole: false,
+            shareRole: false,
+            videoConversionRole: false,
+            folder: [1],
+        };
+        if (format === 'json') {
+            return this.sendResponse(res, { user: userInfo }, format);
+        }
+        return this.sendResponse(res, { user: { attrs: userInfo } }, format);
+    }
+}
+exports.subsonicHandler = new SubsonicHandler();

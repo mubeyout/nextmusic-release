@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>NextMusic Server · 控制台</title>
+    <script>
+        (function () {
+            var pathname = window.location.pathname;
+            var baseHref = pathname.endsWith('/') ? pathname : pathname + '/';
+            var baseTag = document.createElement('base');
+            baseTag.href = baseHref;
+            document.head.prepend(baseTag);
+        })();
+    </script>
+    <script src="/js/config.js"></script>
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
+    <link rel="manifest" href="manifest.json">
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('sw.js').catch(() => { });
+            });
+        }
+    </script>
+    <script src="vendor/js/marked.min.js"></script>
+    <script src="js/ui-utils.js"></script>
+    <script src="js/notification-engine.js"></script>
+</head>
+
+<body>
+    <!-- ============ 内联 SVG symbol 库（纯填充路径，规范审计合规） ============ -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+        <defs>
+            <symbol id="i-dash" viewBox="0 0 24 24"><g fill="currentColor"><rect x="3" y="3" width="7.5" height="9.5" rx="1.8"/><rect x="13.5" y="3" width="7.5" height="5.5" rx="1.8"/><rect x="13.5" y="11" width="7.5" height="10" rx="1.8"/><rect x="3" y="15" width="7.5" height="6" rx="1.8"/></g></symbol>
+            <symbol id="i-user" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="12" cy="8" r="4.4"/><path d="M12 13.4c-3.6 0-6.6 2.1-8.1 5.5-.5 1.1.3 2.4 1.5 2.4h13.2c1.2 0 2-1.3 1.5-2.4-1.5-3.4-4.5-5.5-8.1-5.5z"/></g></symbol>
+            <symbol id="i-music" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="7" cy="18" r="3.4"/><rect x="8.8" y="4" width="2.4" height="14" rx="1.2"/><path d="M11.2 4l8-1.8v4.2l-8 1.8z"/></g></symbol>
+            <symbol id="i-gear" viewBox="0 0 24 24"><g fill="currentColor"><rect x="3" y="5" width="18" height="2.4" rx="1.2"/><rect x="3" y="10.8" width="18" height="2.4" rx="1.2"/><rect x="3" y="16.6" width="18" height="2.4" rx="1.2"/><circle cx="9" cy="6.2" r="2.6"/><circle cx="15.5" cy="12" r="2.6"/><circle cx="7.5" cy="17.8" r="2.6"/></g></symbol>
+            <symbol id="i-cloud" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M7 19a5 5 0 0 1-.9-9.92A6.5 6.5 0 0 1 19 10.6 4 4 0 0 1 18 19H7zm5.7-8.3a1.2 1.2 0 0 0-1.7 0L8.9 13.8a1.2 1.2 0 0 0 1.7 1.7l.9-.9v3.6a1.2 1.2 0 0 0 2.4 0v-3.6l.9.9a1.2 1.2 0 0 0 1.7-1.7l-3.8-3.8z"/></symbol>
+            <symbol id="i-snap" viewBox="0 0 24 24"><g fill="currentColor"><path d="M12 2.6l9.6 5.3L12 13.2 2.4 7.9 12 2.6zm0 4.2L7.7 9.2l4.3 2.4 4.3-2.4L12 6.8z"/><path d="M2.4 12.4L12 17.7l9.6-5.3v3.1L12 20.8l-9.6-5.3v-3.1z"/></g></symbol>
+            <symbol id="i-log" viewBox="0 0 24 24"><g fill="currentColor"><rect x="3" y="4.8" width="18" height="2.4" rx="1.2"/><rect x="3" y="10.8" width="18" height="2.4" rx="1.2"/><rect x="3" y="16.8" width="10" height="2.4" rx="1.2"/></g></symbol>
+            <symbol id="i-folder" viewBox="0 0 24 24"><path fill="currentColor" d="M5 4a2.5 2.5 0 0 0-2.5 2.5v11A2.5 2.5 0 0 0 5 20h14a2.5 2.5 0 0 0 2.5-2.5v-8A2.5 2.5 0 0 0 19 7h-7.6L9.3 4.7A2.5 2.5 0 0 0 7.5 4H5z"/></symbol>
+            <symbol id="i-play" viewBox="0 0 24 24"><path fill="currentColor" d="M8.4 5.2a1.2 1.2 0 0 1 1.8-1.05l9.6 5.8a1.2 1.2 0 0 1 0 2.1l-9.6 5.8a1.2 1.2 0 0 1-1.8-1.05V5.2z"/></symbol>
+            <symbol id="i-info" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zm0 3.4a1.4 1.4 0 1 1 0 2.8 1.4 1.4 0 0 1 0-2.8zm0 4.6a1.2 1.2 0 0 1 1.2 1.2v4a1.2 1.2 0 0 1-2.4 0v-4A1.2 1.2 0 0 1 12 11z"/></symbol>
+            <symbol id="i-plus" viewBox="0 0 24 24"><path fill="currentColor" d="M10.8 4.5a1.2 1.2 0 0 1 2.4 0v6.3h6.3a1.2 1.2 0 0 1 0 2.4h-6.3v6.3a1.2 1.2 0 0 1-2.4 0v-6.3H4.5a1.2 1.2 0 0 1 0-2.4h6.3V4.5z"/></symbol>
+            <symbol id="i-refresh" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 3.5a8.5 8.5 0 0 1 7.1 3.84V4.9a1.2 1.2 0 0 1 2.4 0v4.7a1.2 1.2 0 0 1-1.2 1.2h-4.7a1.2 1.2 0 0 1 0-2.4h2.06A6.1 6.1 0 1 0 18 13.5a1.2 1.2 0 1 1 2.32.6A8.5 8.5 0 1 1 12 3.5z"/></symbol>
+            <symbol id="i-down" viewBox="0 0 24 24"><g fill="currentColor"><path d="M6.6 11.2a1.3 1.3 0 0 1 1.8 0l2.3 2.3V4.8a1.3 1.3 0 0 1 2.6 0v8.7l2.3-2.3a1.3 1.3 0 0 1 1.8 1.8l-4.5 4.5a1.3 1.3 0 0 1-1.8 0l-4.5-4.5a1.3 1.3 0 0 1 0-1.8z"/><rect x="4" y="19" width="16" height="2" rx="1"/></g></symbol>
+            <symbol id="i-up" viewBox="0 0 24 24"><g fill="currentColor"><path d="M6.6 12.8a1.3 1.3 0 0 0 1.8 0l2.3-2.3v8.7a1.3 1.3 0 0 0 2.6 0v-8.7l2.3 2.3a1.3 1.3 0 0 0 1.8-1.8L12.9 6.5a1.3 1.3 0 0 0-1.8 0L6.6 11a1.3 1.3 0 0 0 0 1.8z"/><rect x="4" y="3" width="16" height="2" rx="1"/></g></symbol>
+            <symbol id="i-chev" viewBox="0 0 24 24"><path fill="currentColor" d="M6.7 9.3a1.2 1.2 0 0 1 1.7 0L12 12.9l3.6-3.6a1.2 1.2 0 0 1 1.7 1.7l-4.5 4.5a1.2 1.2 0 0 1-1.7 0L6.7 11a1.2 1.2 0 0 1 0-1.7z"/></symbol>
+            <symbol id="i-check" viewBox="0 0 24 24"><path fill="currentColor" d="M20.4 6.9a1.3 1.3 0 0 0-1.8 0L9.7 15.8l-4.3-4.2a1.3 1.3 0 1 0-1.8 1.8l5.2 5.2c.5.5 1.3.5 1.8 0l9.8-9.8c.5-.5.5-1.3 0-1.9z"/></symbol>
+            <symbol id="i-warn" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M10.6 4.1L2.3 18.4A1.4 1.4 0 0 0 3.5 20.5h17a1.4 1.4 0 0 0 1.2-2.1L13.4 4.1a1.4 1.4 0 0 0-2.8 0zm1.4 4.6a1.2 1.2 0 0 1 1.2 1.2v3.6a1.2 1.2 0 0 1-2.4 0V9.9a1.2 1.2 0 0 1 1.2-1.2zm0 7.1a1.3 1.3 0 1 1 0 2.6 1.3 1.3 0 0 1 0-2.6z"/></symbol>
+            <symbol id="i-file" viewBox="0 0 24 24"><path fill="currentColor" d="M6 2.8h7.2c.3 0 .6.1.9.4l4 4c.2.2.4.5.4.9v12.1a1.3 1.3 0 0 1-1.3 1.3H6a1.3 1.3 0 0 1-1.3-1.3V4.1A1.3 1.3 0 0 1 6 2.8zm6.5 1.9v3.7h3.7l-3.7-3.7z"/></symbol>
+            <symbol id="i-search" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M10.5 3a7.5 7.5 0 1 0 4.55 13.46l4 4a1.2 1.2 0 0 0 1.7-1.7l-4-4A7.5 7.5 0 0 0 10.5 3zm0 2.4a5.1 5.1 0 1 1 0 10.2 5.1 5.1 0 0 1 0-10.2z"/></symbol>
+            <symbol id="i-edit" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M16.9 3.3a2.5 2.5 0 0 1 3.5 3.5l-1.2 1.3-3.5-3.5 1.2-1.3zM14.3 5.9l3.5 3.5-9.4 9.4-4 .6.6-4 9.3-9.5zM4.5 20.4h15a1.2 1.2 0 0 0 0-2.4h-15a1.2 1.2 0 0 0 0 2.4z"/></symbol>
+            <symbol id="i-trash" viewBox="0 0 24 24"><g fill="currentColor"><path d="M9.2 2.9a1.4 1.4 0 0 1 1.4-1.1h2.8c.67 0 1.24.46 1.4 1.1l.34 1.42h3.06a1.2 1.2 0 0 1 0 2.4H5.8a1.2 1.2 0 0 1 0-2.4h3.06l.34-1.42zM6.6 8.1h10.8l-.72 11a1.9 1.9 0 0 1-1.9 1.76H9.22A1.9 1.9 0 0 1 7.32 19.1L6.6 8.1z"/></g></symbol>
+            <symbol id="i-eye" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 5.4c-4.7 0-8 3.7-9.2 5.7a1.9 1.9 0 0 0 0 1.9C4 15 7.3 18.7 12 18.7s8-3.7 9.2-5.7a1.9 1.9 0 0 0 0-1.9C20 9.1 16.7 5.4 12 5.4zm0 3.2a3.4 3.4 0 1 1 0 6.8 3.4 3.4 0 0 1 0-6.8zm0 2a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8z"/></symbol>
+            <symbol id="i-x" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M6.3 4.9a1.2 1.2 0 0 0-1.7 1.7L10.3 12l-5.7 5.4a1.2 1.2 0 0 0 1.7 1.7l5.7-5.4 5.7 5.4a1.2 1.2 0 0 0 1.7-1.7L13.7 12l5.7-5.4a1.2 1.2 0 0 0-1.7-1.7L12 10.3 6.3 4.9z"/></symbol>
+            <symbol id="i-back" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M14.7 4.9a1.3 1.3 0 0 0-1.8 0L6.6 11a1.9 1.9 0 0 0 0 2.7l6.3 6.1a1.3 1.3 0 0 0 1.8-1.8L8.7 12.6a.5.5 0 0 1 0-.7l5.9-5.5a1.3 1.3 0 0 0 0-1.8z" transform="translate(1)"/></symbol>
+            <symbol id="i-heart" viewBox="0 0 24 24"><path fill="currentColor" d="M12 21.1l-1.5-1.36C5.4 15.24 2 12.18 2 8.44 2 5.42 4.38 3 7.36 3c1.72 0 3.36.8 4.64 2.32C13.28 3.8 14.92 3 16.64 3 19.62 3 22 5.42 22 8.44c0 3.74-3.4 6.8-8.5 11.3L12 21.1z"/></symbol>
+            <symbol id="i-disc" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 2.5a9.5 9.5 0 1 0 0 19 9.5 9.5 0 0 0 0-19zm0 6.7a2.8 2.8 0 1 1 0 5.6 2.8 2.8 0 0 1 0-5.6zm0 1.7a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2z"/></symbol>
+            <symbol id="i-mic" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 2.6a3.4 3.4 0 0 1 3.4 3.4v5.4a3.4 3.4 0 0 1-6.8 0V6A3.4 3.4 0 0 1 12 2.6zM6.3 10.4a1.2 1.2 0 0 1 1.2 1.15c.13 2.6 1.85 4.55 4.5 4.55s4.37-1.95 4.5-4.55a1.2 1.2 0 0 1 2.4.11c-.16 3.4-2.3 6.14-5.7 6.77v1.72h2.3a1.2 1.2 0 0 1 0 2.4H8.5a1.2 1.2 0 0 1 0-2.4h2.3v-1.72c-3.4-.63-5.54-3.37-5.7-6.77a1.2 1.2 0 0 1 1.2-1.26z"/></symbol>
+            <symbol id="i-menu" viewBox="0 0 24 24"><g fill="currentColor"><rect x="4" y="6.2" width="16" height="2.2" rx="1.1"/><rect x="4" y="11" width="16" height="2.2" rx="1.1"/><rect x="4" y="15.8" width="16" height="2.2" rx="1.1"/></g></symbol>
+            <symbol id="i-wave" viewBox="0 0 24 24"><path fill="currentColor" d="M3.2 10H5.8V14H3.2zM8.7 5.5H11.3V18.5H8.7zM14.2 8H16.8V16H14.2zM19.2 11H21.8V13H19.2z"/></symbol>
+            <symbol id="i-power" viewBox="0 0 24 24"><g fill="currentColor"><path d="M11 3.2a1.2 1.2 0 0 1 2.4 0v7a1.2 1.2 0 0 1-2.4 0v-7z"/><path fill-rule="evenodd" d="M7.8 6.4a1.2 1.2 0 0 1-.2 1.69A6.55 6.55 0 0 0 5.4 12.9a6.6 6.6 0 1 0 13.2 0c0-1.85-.76-3.52-2-4.81a1.2 1.2 0 1 1 1.7-1.69A9 9 0 1 1 3 12.9a8.94 8.94 0 0 1 3.1-6.5 1.2 1.2 0 0 1 1.7.2z" transform="translate(0 .1)"/></g></symbol>
+        </defs>
+    </svg>
+
+    <!-- ============ 登录 ============ -->
+    <div id="login-overlay">
+        <div class="login-card">
+            <div class="login-art">
+                <svg viewBox="0 0 320 320" aria-label="NextMusic">
+                    <defs><clipPath id="lg-clip"><rect width="320" height="320" rx="72"/></clipPath></defs>
+                    <g clip-path="url(#lg-clip)">
+                        <rect width="320" height="320" fill="#020805"/>
+                        <path d="M134.4 72.5954C134.4 66.1954 139.2 64.5954 144 69.3954L166.4 91.7954V206.995C166.4 234.195 145.6 253.395 116.8 253.395C89.5999 253.395 70.3999 235.795 70.3999 211.795C70.3999 187.795 89.5999 170.195 116.8 170.195C123.2 170.195 129.6 171.795 134.4 173.395V72.5954Z" fill="#1ED760"/>
+                        <path d="M179.2 112.595L208 139.795V218.195C208 232.595 201.6 238.995 193.6 238.995C184 238.995 179.2 232.595 179.2 219.795V112.595Z" fill="#6BE88F"/>
+                        <path d="M220.8 152.595L249.6 179.795V218.195C249.6 232.595 243.2 238.995 235.2 238.995C225.6 238.995 220.8 232.595 220.8 219.795V152.595Z" fill="#6BE88F"/>
+                    </g>
+                </svg>
+            </div>
+            <h1>NextMusic Server</h1>
+            <div class="sub">欢迎回家 · 你的音乐，你的服务器</div>
+            <div class="field">
+                <label for="access-password">访问密码</label>
+                <input type="password" id="access-password" class="inp" placeholder="请输入访问密码" autocomplete="off" autofocus>
+            </div>
+            <button id="login-btn" class="btn-p">进入 Server</button>
+            <p id="login-error" class="login-error"></p>
+        </div>
+    </div>
+
+    <!-- ============ 主应用 ============ -->
+    <div id="app" class="hidden">
+        <div id="mobile-sidebar-overlay" class="mobile-scrim"></div>
+
+        <aside class="sidebar" id="sidebar">
+            <div class="brand">
+                <span class="brand-mark">
+                    <svg viewBox="0 0 200 200" aria-hidden="true">
+                        <path d="M84 45.7443C84 41.7443 87 40.7443 90 43.7443L104 57.7443V129.744C104 146.744 91 158.744 73 158.744C56 158.744 44 147.744 44 132.744C44 117.744 56 106.744 73 106.744C77 106.744 81 107.744 84 108.744V45.7443Z" fill="#1ED760"/>
+                        <path d="M112 70.7444L130 87.7444V136.744C130 145.744 126 149.744 121 149.744C115 149.744 112 145.744 112 137.744V70.7444Z" fill="#2DDB6E"/>
+                        <path d="M138 95.7444L156 112.744V136.744C156 145.744 152 149.744 147 149.744C141 149.744 138 145.744 138 137.744V95.7444Z" fill="#4AE182"/>
+                    </svg>
+                </span>
+                <b>NextMusic</b>
+            </div>
+            <a class="nav-item on" data-view="dashboard"><svg class="ic2"><use href="#i-dash"/></svg>仪表盘</a>
+            <a class="nav-item" data-view="users"><svg class="ic2"><use href="#i-user"/></svg>用户</a>
+            <a class="nav-item" data-view="data"><svg class="ic2"><use href="#i-music"/></svg>数据</a>
+            <a class="nav-item" data-view="config"><svg class="ic2"><use href="#i-gear"/></svg>设置</a>
+            <a class="nav-item" data-view="webdav"><svg class="ic2"><use href="#i-cloud"/></svg>WebDAV</a>
+            <a class="nav-item" data-view="sources"><svg class="ic2"><use href="#i-wave"/></svg>音源</a>
+            <a class="nav-item" data-view="snapshots"><svg class="ic2"><use href="#i-snap"/></svg>快照</a>
+            <a class="nav-item" data-view="logs"><svg class="ic2"><use href="#i-log"/></svg>日志</a>
+            <div class="side-b">
+                <a class="nav-item" data-view="files"><svg class="ic2"><use href="#i-folder"/></svg>文件</a>
+                <a class="nav-item" data-view="music" id="nav-player-link"><svg class="ic2"><use href="#i-play"/></svg>播放器</a>
+                <a class="nav-item" data-view="about"><svg class="ic2"><use href="#i-info"/></svg>关于</a>
+                <div class="side-logout">
+                    <a class="nav-item" id="logout-btn"><svg class="ic2"><use href="#i-power"/></svg>退出登录</a>
+                </div>
+            </div>
+            <div class="side-ver" id="sidebar-version">NextMusic Server</div>
+        </aside>
+
+        <main class="main">
+            <!-- 移动端顶栏 -->
+            <div class="mobile-topbar">
+                <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="菜单"><svg class="ic2"><use href="#i-menu"/></svg></button>
+                <span style="font-size:14px;font-weight:700">NextMusic Server</span>
+            </div>
+
+            <!-- ============ 仪表盘 ============ -->
+            <section class="view" id="view-dashboard">
+                <div class="crumb">Server / <b>仪表盘</b></div>
+                <div class="glass welcome">
+                    <div>
+                        <div class="wk">SERVER · <span class="sev"></span> <span id="dash-run-state">运行中</span> · UPTIME <span id="dash-uptime">-</span></div>
+                        <div class="wt" id="greeting-text">你好</div>
+                        <div class="wm" id="dash-summary"><b>-</b> 位用户 · <b>-</b> 台在线设备</div>
+                    </div>
+                    <div class="wr">
+                        <button class="pill" id="dash-sync-btn"><svg class="ic"><use href="#i-play"/></svg> 立即同步</button>
+                        <button class="pill ghost" id="dash-snapshot-btn"><svg class="ic"><use href="#i-snap"/></svg> 创建快照</button>
+                        <button class="pill ghost" id="restart-server-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重启服务</button>
+                    </div>
+                </div>
+                <div class="stat-row">
+                    <div class="stat">
+                        <div class="lbl">用户 <span class="sev"></span></div>
+                        <div class="v"><span id="stat-users">0</span><span class="u">位</span></div>
+                        <svg class="spark" id="spark-users" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                        <div class="lb2"><span id="dash-date">-</span><span>现在</span></div>
+                    </div>
+                    <div class="stat">
+                        <div class="lbl">同步连接 <span class="sev"></span></div>
+                        <div class="v"><span id="stat-devices">0</span><span class="u">台</span></div>
+                        <svg class="spark" id="spark-devices" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                        <div class="lb2"><span>实时</span><span id="stat-cpu-info">-</span></div>
+                    </div>
+                    <div class="stat">
+                        <div class="lbl">CPU <span class="sev" id="sev-cpu"></span></div>
+                        <div class="v"><span id="stat-cpu">0</span><span class="u">%</span><span class="v2" id="stat-process-cpu"></span></div>
+                        <svg class="spark" id="spark-cpu" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                        <div class="lb2"><span>系统</span><span>进程</span></div>
+                    </div>
+                    <div class="stat">
+                        <div class="lbl">内存 <span class="sev warn" id="sev-mem"></span></div>
+                        <div class="v"><span id="stat-memory-percent">0</span><span class="u">%</span></div>
+                        <div class="membar"><i id="membar-fill" style="width:0%"></i></div>
+                        <div class="lb2"><span id="stat-memory">-</span><span id="stat-process-memory-percent"></span></div>
+                    </div>
+                </div>
+                <div class="dash-lower">
+                    <div class="panel">
+                        <div class="sec-hd"><h4>系统负载 · 实时</h4><span>每 3 秒采样</span></div>
+                        <div class="chart-legend"><span><i style="background:#1ED760"></i>CPU %</span><span><i style="background:#4A90E2"></i>内存 %</span></div>
+                        <div class="chart-box">
+                            <svg id="load-chart" viewBox="0 0 600 150" preserveAspectRatio="none"></svg>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="sec-hd"><h4>常用功能</h4></div>
+                        <div style="padding:14px 16px 0">
+                            <div class="quick">
+                                <div class="q" data-qact="add-user"><div class="qi"><svg class="ic"><use href="#i-user"/></svg></div><div><b>新增用户</b><span>授权新设备</span></div></div>
+                                <div class="q" data-qact="snapshot"><div class="qi"><svg class="ic"><use href="#i-snap"/></svg></div><div><b>创建快照</b><span>全量备份</span></div></div>
+                                <div class="q" data-qact="config"><div class="qi"><svg class="ic"><use href="#i-gear"/></svg></div><div><b>修改配置</b><span>服务参数</span></div></div>
+                                <div class="q" data-qact="logs"><div class="qi"><svg class="ic"><use href="#i-log"/></svg></div><div><b>查看日志</b><span>运行状态</span></div></div>
+                            </div>
+                            <div class="act">服务运行时长 <span class="st" id="stat-uptime">-</span></div>
+                            <div class="act">WebDAV 同步 <span class="st" id="webdav-state-dash">未配置</span></div>
+                            <div class="act">Subsonic 服务 <span class="st" id="subsonic-state-dash">-</span></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ 用户 ============ -->
+            <section class="view hidden" id="view-users">
+                <div class="crumb">Server / <b>用户</b></div>
+                <div class="vhd">
+                    <div><h2>用户管理</h2><div class="sub" id="users-subtitle">管理服务器的同步用户</div></div>
+                    <div class="acts">
+                        <div class="search-box"><svg class="ic"><use href="#i-search"/></svg><input type="text" id="user-search-input" placeholder="输入用户名搜索..."></div>
+                        <button class="pill ghost" id="refresh-users-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重载数据</button>
+                        <button class="pill danger hidden" id="batch-delete-users-btn"><svg class="ic"><use href="#i-trash"/></svg> 批量删除 (<span id="user-selected-count">0</span>)</button>
+                        <button class="pill" id="add-user-btn"><svg class="ic"><use href="#i-plus"/></svg> 新增用户</button>
+                    </div>
+                </div>
+                <div class="table">
+                    <div class="trow hd users-row">
+                        <span style="display:flex;align-items:center;gap:10px"><input type="checkbox" class="sel" id="select-all-users"> 用户</span>
+                        <span>连接密码</span><span class="col-devices">状态</span><span>自定义目录</span>
+                        <span style="text-align:right">操作</span>
+                    </div>
+                    <div id="users-list"></div>
+                </div>
+            </section>
+
+            <!-- ============ 数据 ============ -->
+            <section class="view hidden" id="view-data">
+                <div class="crumb">Server / <b>数据</b></div>
+                <div class="vhd">
+                    <div><h2>用户数据</h2><div class="sub">浏览 / 管理各用户的歌单、专辑、歌手数据</div></div>
+                    <div class="acts">
+                        <div class="usel" id="data-user-selector">
+                            <button class="usel-trigger" onclick="app.toggleUserDropdown('data')"><svg class="ic"><use href="#i-user"/></svg><span class="usel-label">选择用户</span><svg class="ic" style="width:12px;height:12px"><use href="#i-chev"/></svg></button>
+                            <div class="usel-menu hidden" id="data-user-menu"></div>
+                        </div>
+                        <input type="hidden" id="data-user-select" value="">
+                        <button class="pill ghost" id="refresh-data-btn"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+                    </div>
+                </div>
+                <div class="data-stats hidden" id="data-stats"></div>
+                <div class="tabs hidden" id="data-tabs-container">
+                    <span class="tab" data-tab="all" onclick="app.setDataTab('all')">全部</span>
+                    <span class="tab" data-tab="playlists" onclick="app.setDataTab('playlists')">歌单 <span class="ct" id="tab-count-playlists">0</span></span>
+                    <span class="tab" data-tab="albums" onclick="app.setDataTab('albums')">专辑 <span class="ct" id="tab-count-albums">0</span></span>
+                    <span class="tab" data-tab="artists" onclick="app.setDataTab('artists')">歌手 <span class="ct" id="tab-count-artists">0</span></span>
+                </div>
+                <div id="data-content"></div>
+            </section>
+
+            <!-- ============ 设置 ============ -->
+            <section class="view hidden" id="view-config">
+                <div class="crumb">Server / <b>设置</b></div>
+                <div class="vhd">
+                    <div><h2>系统设置</h2><div class="sub">与 lxserver 配置项一一对应 · 修改后需保存生效</div></div>
+                    <div class="acts">
+                        <button class="pill ghost" id="reload-config-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重载配置文件</button>
+                        <button class="pill ghost" id="restart-server-config-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重启服务</button>
+                    </div>
+                </div>
+
+                <form id="config-form">
+                    <div class="ctabs">
+                        <button type="button" class="ctab on" data-t="t0" onclick="app.ctab(this)">基本</button>
+                        <button type="button" class="ctab" data-t="t1" onclick="app.ctab(this)">访问与安全</button>
+                        <button type="button" class="ctab" data-t="t2" onclick="app.ctab(this)">公开访问权限</button>
+                        <button type="button" class="ctab" data-t="t3" onclick="app.ctab(this)">音乐源与Subsonic</button>
+                        <button type="button" class="ctab" data-t="t4" onclick="app.ctab(this)">存储备份</button>
+                    </div>
+
+                    <!-- Tab 0 基本 -->
+                    <div class="cpane on" id="t0">
+                        <div class="cfg">
+                            <h4>基本配置</h4><div class="desc">服务标识与快照策略</div>
+                            <div class="frow">
+                                <div class="field"><label>服务器名称</label><input type="text" name="serverName" class="inp" placeholder="NextMusic Server"></div>
+                                <div class="field"><label>最大快照数</label><input type="number" name="maxSnapshotNum" class="inp" placeholder="10" min="1"></div>
+                            </div>
+                            <div class="field">
+                                <label>添加歌曲位置</label>
+                                <select name="list.addMusicLocationType" class="inp">
+                                    <option value="top">顶部</option>
+                                    <option value="bottom">底部</option>
+                                </select>
+                                <div class="hint">添加歌曲到「我的列表」时的位置，参考客户端的列表设置</div>
+                            </div>
+                        </div>
+                        <div class="cfg">
+                            <h4>代理配置</h4><div class="desc">反向代理识别与 API 出站代理</div>
+                            <div class="switch-row">
+                                <div><div class="t">启用反向代理支持</div><div class="d">开启后通过反代请求头识别客户端真实 IP</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="proxy.enabled"><span class="sw"></span></label>
+                            </div>
+                            <div class="field"><label>反代请求头（Forwarded Headers）</label><input type="text" name="proxy.header" class="inp" placeholder="如 x-real-ip"></div>
+                            <div class="switch-row" style="margin-top:12px">
+                                <div><div class="t">启用 API 服务端代理</div><div class="d">服务端获取歌词 / 热搜 / 歌单等将通过此代理发出</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="proxy.all.enabled"><span class="sw"></span></label>
+                            </div>
+                            <div class="field">
+                                <label>代理地址 <button type="button" class="hint-btn" id="test-proxy-btn">测试连接</button></label>
+                                <input type="text" name="proxy.all.address" class="inp" placeholder="http://127.0.0.1:7890">
+                                <div class="hint">支持 http:// 或 socks5://</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tab 1 访问与安全 -->
+                    <div class="cpane" id="t1">
+                        <div class="cfg">
+                            <h4>访问密码</h4><div class="desc">控制台与播放器两道独立门禁</div>
+                            <div class="frow">
+                                <div class="field"><label>前端访问密码</label><input type="password" name="frontend.password" class="inp" placeholder="管理控制台登录密码" autocomplete="new-password"></div>
+                                <div class="field"><label>Web 播放器访问密码</label><input type="password" name="player.password" class="inp" placeholder="播放器专属密码" autocomplete="new-password"></div>
+                            </div>
+                            <div class="switch-row">
+                                <div><div class="t">播放器密码保护</div><div class="d">开启后访问播放器需要验证密码</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="player.enableAuth"><span class="sw"></span></label>
+                            </div>
+                        </div>
+                        <div class="cfg">
+                            <h4>访问路径</h4><div class="desc">以 / 开头，留空表示根路径 · 保存后立刻生效</div>
+                            <div class="frow">
+                                <div class="field"><label>后台管理路径</label><input type="text" name="admin.path" id="admin-path-input" class="inp" placeholder="留空表示根路径 /"><div class="hint">不能与播放器路径相同，不能以 /api 开头</div></div>
+                                <div class="field"><label>播放器路径</label><input type="text" name="player.path" id="player-path-input" class="inp" placeholder="/"><div class="hint">留空或输入 / 表示根路径</div></div>
+                            </div>
+                            <div class="path-conflict-error" id="path-conflict-error"></div>
+                        </div>
+                        <div class="cfg">
+                            <h4>用户路径与鉴权</h4><div class="desc">客户端连接 URL 模式</div>
+                            <div class="switch-row">
+                                <div><div class="t">启用根路径</div><div class="d">连接 URL 即为根路径，不允许不同用户使用相同密码</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="user.enableRoot"><span class="sw"></span></label>
+                            </div>
+                            <div class="switch-row">
+                                <div><div class="t">启用用户路径</div><div class="d">连接 URL 需包含 /用户名 路径，允许不同用户使用相同密码</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="user.enablePath"><span class="sw"></span></label>
+                            </div>
+                        </div>
+                        <div class="cfg">
+                            <h4>登录用户限制</h4><div class="desc">针对非管理员登录用户的权限管控</div>
+                            <div class="switch-row">
+                                <div><div class="t">限制登录用户核心缓存设置</div><div class="d">开启后所有非管理员登录用户不可修改核心缓存设置（不影响音源管理）</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="user.enableLoginCacheRestriction"><span class="sw"></span></label>
+                            </div>
+                            <div class="switch-row">
+                                <div><div class="t">允许 VM 模式运行脚本</div><div class="d" style="color:var(--red)">警告：原生 VM 模式不具备沙盒安全性，可能导致服务器被执行任意系统命令，请仅在信任脚本来源时开启。</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="system.allowUnsafeVM"><span class="sw"></span></label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tab 2 公开访问权限 -->
+                    <div class="cpane" id="t2">
+                        <div class="cfg">
+                            <h4>公开用户权限限制</h4><div class="desc">未登录管理员的公开账号能做什么 · 逐项授权</div>
+                            <div class="switch-row">
+                                <div><div class="t">开启公开用户限制</div><div class="d">总开关 · 未验证的公开用户将被限制核心缓存设置与公开音源查看管理</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="user.enablePublicRestriction"><span class="sw"></span></label>
+                            </div>
+                            <div id="public-non-admin-local-music-wrapper" style="margin-left:16px;padding-left:12px;border-left:2px solid var(--green)">
+                                <div class="switch-row">
+                                    <div><div class="t">开启非管理员访问本地音乐</div><div class="d">允许公开账号访问服务器本地音乐</div></div>
+                                    <label class="sw-wrap"><input type="checkbox" name="user.enablePublicNonAdminLocalMusic"><span class="sw"></span></label>
+                                </div>
+                                <div class="switch-row">
+                                    <div><div class="t">开启非管理员浏览器下载</div><div class="d">允许公开账号使用浏览器在线播放下载歌曲</div></div>
+                                    <label class="sw-wrap"><input type="checkbox" name="user.enablePublicNonAdminBrowserDownload"><span class="sw"></span></label>
+                                </div>
+                                <div class="switch-row">
+                                    <div><div class="t">开启非管理员服务器缓存</div><div class="d">允许公开账号将歌曲缓存或写入服务器存储</div></div>
+                                    <label class="sw-wrap"><input type="checkbox" name="user.enablePublicNonAdminServerCache"><span class="sw"></span></label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="cfg">
+                            <h4>管理员托管公开内容</h4><div class="desc">公开收藏 / 本地歌单由谁维护</div>
+                            <div class="switch-row">
+                                <div><div class="t">开启公开收藏和歌曲</div><div class="d">开启后允许登录管理员为公开用户创建公开收藏与本地音乐歌单文件（仅管理员可管理）</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="user.enablePublicFavorites"><span class="sw"></span></label>
+                            </div>
+                            <div id="public-non-admin-access-wrapper" style="margin-left:16px;padding-left:12px;border-left:2px solid var(--green)">
+                                <div class="switch-row">
+                                    <div><div class="t">开启非管理员访问</div><div class="d">允许公开账号查看公开收藏和歌曲</div></div>
+                                    <label class="sw-wrap"><input type="checkbox" name="user.enablePublicNonAdminAccess"><span class="sw"></span></label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tab 3 音乐源与 Subsonic -->
+                    <div class="cpane" id="t3">
+                        <div class="cfg">
+                            <h4>Subsonic 协议</h4><div class="desc">第三方 Subsonic 客户端接入（如 PlaySub / Symfonium）</div>
+                            <div class="switch-row">
+                                <div><div class="t">启用 Subsonic 服务</div><div class="d">允许 Subsonic 客户端连接并同步歌单</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="subsonic.enable"><span class="sw"></span></label>
+                            </div>
+                            <div class="switch-row">
+                                <div><div class="t">Subsonic 调试日志模式</div><div class="d">在服务器控制台实时打印所有客户端发起的 Subsonic 请求</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="subsonic.enableDebug"><span class="sw"></span></label>
+                            </div>
+                            <div class="field"><label>Subsonic 访问路径</label><input type="text" name="subsonic.path" class="inp" placeholder="/rest"><div class="hint">默认 /rest · 修改后需在客户端同步更新 URL</div></div>
+                        </div>
+                        <div class="cfg">
+                            <h4>在线搜索</h4><div class="desc">Subsonic 客户端搜索行为</div>
+                            <div class="switch-row">
+                                <div><div class="t">允许全网检索</div><div class="d">允许客户端在搜索歌曲时检索全网音乐 API</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="subsonic.onlineSearch"><span class="sw"></span></label>
+                            </div>
+                            <div class="field">
+                                <label>默认在线搜索模式</label>
+                                <select name="subsonic.onlineSearchMode" class="inp">
+                                    <option value="fallback">自动兜底（本地未命中或数量不足时搜在线）</option>
+                                    <option value="merge">本地与在线融合搜索（本地置顶，在线追加）</option>
+                                    <option value="local_only">仅搜索本地歌单</option>
+                                </select>
+                            </div>
+                            <div class="field"><label>默认在线搜索平台</label><input type="text" name="subsonic.onlineSearchSources" class="inp" placeholder="wy,tx,kw,kg,mg"><div class="hint">可选 wy / tx / kw / kg / mg，英文逗号分隔</div></div>
+                            <div class="switch-row">
+                                <div><div class="t">歌词包含翻译</div><div class="d">歌词响应中包含翻译文本（原文在上，翻译在下）</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="subsonic.lyricTranslation"><span class="sw"></span></label>
+                            </div>
+                            <div class="field">
+                                <label>歌手信息源优先级</label>
+                                <select name="singer.sourcePriority" class="inp">
+                                    <option value="tx,wy">TX 优先</option>
+                                    <option value="wy,tx">WY 优先</option>
+                                    <option value="tx">仅 TX</option>
+                                    <option value="wy">仅 WY</option>
+                                </select>
+                                <div class="hint">决定歌手详情、头像及简介的获取来源</div>
+                            </div>
+                            <div class="cfg-note">
+                                <strong>Subsonic 客户端搜索：</strong>直接输入歌曲名时使用「默认在线搜索模式」，也可使用前缀：
+                                <code>all:歌名</code> / <code>online:歌名</code> 搜索全部已启用平台；<code>local:歌名</code> 只搜本地歌单；
+                                <code>wy:</code> <code>tx:</code> <code>kw:</code> <code>kg:</code> <code>mg:</code> 指定单个平台。
+                                同时间戳歌词顺序为原文在上、翻译在下。
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tab 4 存储备份 -->
+                    <div class="cpane" id="t4">
+                        <div class="cfg">
+                            <h4>自定义歌曲目录</h4><div class="desc">本地曲库位置 · 对应 config.js 路径引用</div>
+                            <div class="switch-row">
+                                <div><div class="t">启用自定义歌曲目录</div><div class="d">开启后优先使用自定义目录加载与存放歌曲</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="user.enableCustomMusicDir"><span class="sw"></span></label>
+                            </div>
+                            <div class="cfg-note">
+                                <strong>目录配置说明</strong> · Windows: <code>D:/Music</code> · Linux / macOS: <code>/home/user/music</code> ·
+                                Docker: 需先挂载容器目录，如 <code>/app/music</code><br>
+                                配置文件参考路径 (config.js): <code id="config-js-path-ref">--</code><br>
+                                各用户独立目录在「用户管理 · 配置」弹窗中设置。
+                            </div>
+                        </div>
+                        <div class="cfg">
+                            <h4>缓存与空间</h4><div class="desc">用户配额与 LRU 清理</div>
+                            <div class="switch-row">
+                                <div><div class="t">开启缓存空间限制</div><div class="d">缓存总量超出限制时按时间顺序（LRU）自动清理最旧文件</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="user.enableCacheSizeLimit"><span class="sw"></span></label>
+                            </div>
+                            <div class="field"><label>空间限制大小 (MB)</label><input type="number" name="user.cacheSizeLimit" class="inp" placeholder="默认 2000" min="10"></div>
+                        </div>
+                        <div class="cfg">
+                            <h4>WebDAV 同步配置</h4><div class="desc">云端数据同步与定时备份 · 操作入口在「WebDAV」视图</div>
+                            <div class="switch-row">
+                                <div><div class="t">启用 WebDAV 同步服务</div><div class="d">开启或关闭云端数据同步与自动备份</div></div>
+                                <label class="sw-wrap"><input type="checkbox" name="webdav.enable"><span class="sw"></span></label>
+                            </div>
+                            <div class="field"><label>WebDAV 服务器地址</label><input type="text" name="webdav.url" class="inp" placeholder="https://your-webdav-server.com/remote.php/webdav"></div>
+                            <div class="frow">
+                                <div class="field"><label>用户名</label><input type="text" name="webdav.username" class="inp"></div>
+                                <div class="field"><label>密码</label><input type="password" name="webdav.password" class="inp" autocomplete="new-password"></div>
+                            </div>
+                            <div class="frow">
+                                <div class="field"><label>增量同步远端路径</label><input type="text" name="webdav.syncPath" class="inp" placeholder="/lx-sync"><div class="hint">默认 /lx-sync</div></div>
+                                <div class="field"><label>全量备份远端路径</label><input type="text" name="webdav.backupPath" class="inp" placeholder="/lx-sync-backups"><div class="hint">默认 /lx-sync-backups</div></div>
+                            </div>
+                            <div class="frow">
+                                <div class="field"><label>增量同步间隔（分钟）</label><input type="number" name="sync.interval" class="inp" value="60" min="1"><div class="hint">用于定时检测并同步增量变更文件</div></div>
+                                <div class="field"><label>全量备份间隔（小时）</label><input type="number" name="sync.backupInterval" class="inp" value="24" min="1"><div class="hint">定时自动创建 ZIP 全量备份包并上传云端</div></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="save-bar">
+                        <div class="inner">
+                            <button type="button" class="pill ghost" id="config-discard-btn">放弃更改</button>
+                            <button type="submit" class="pill"><svg class="ic"><use href="#i-check"/></svg> 保存全部配置</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+
+            <!-- ============ 音源管理 ============ -->
+            <section class="view hidden" id="view-sources">
+                <div class="crumb">Server / <b>音源</b></div>
+                <div class="vhd">
+                    <div><h2>音源管理</h2><div class="sub">服务器端自定义音源 · 共享源全端可用</div></div>
+                    <div class="acts">
+                        <button class="pill ghost" id="cs-refresh-btn"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+                        <button class="pill ghost" id="cs-url-btn"><svg class="ic"><use href="#i-plus"/></svg> URL 添加</button>
+                        <button class="pill" id="cs-upload-btn"><svg class="ic"><use href="#i-up"/></svg> 上传脚本</button>
+                        <input type="file" id="cs-file-input" class="hidden" accept=".js">
+                    </div>
+                </div>
+                <div class="table">
+                    <div class="trow hd users-row" style="grid-template-columns:2.4fr 1fr 1fr 1.2fr 1.4fr">
+                        <span>音源</span><span>版本</span><span>平台</span><span>状态</span><span style="text-align:right">操作</span>
+                    </div>
+                    <div id="cs-list"></div>
+                </div>
+            </section>
+
+            <!-- ============ WebDAV ============ -->
+            <section class="view hidden" id="view-webdav">
+                <div class="crumb">Server / <b>WebDAV</b></div>
+                <div class="vhd">
+                    <div><h2>WebDAV 同步</h2><div class="sub">增量同步 + 全量备份，双通道</div></div>
+                    <div class="acts">
+                        <button class="pill ghost" id="refresh-sync-logs-btn"><svg class="ic"><use href="#i-log"/></svg> 刷新日志</button>
+                        <button class="pill" id="sync-files-btn"><svg class="ic"><use href="#i-play"/></svg> 立即同步</button>
+                    </div>
+                </div>
+
+                <div id="webdav-cloud-group" class="glass" style="margin-bottom:14px">
+                    <div class="status-line"><span class="sev" id="webdav-sev"></span> <span id="webdav-state-line">已配置</span><span class="lat" id="webdav-host-hint"></span></div>
+                    <div class="pad">
+                        <div class="action-grid">
+                            <button class="action-card" id="test-webdav-btn"><div class="ai"><svg class="ic"><use href="#i-check"/></svg></div><b>测试连接</b><span>验证 WebDAV 配置</span></button>
+                            <button class="action-card" id="backup-webdav-btn"><div class="ai"><svg class="ic"><use href="#i-up"/></svg></div><b>立即备份</b><span>创建全量 ZIP 备份</span></button>
+                            <button class="action-card" id="restore-webdav-btn"><div class="ai"><svg class="ic"><use href="#i-down"/></svg></div><b>从云端恢复</b><span>下载并恢复数据</span></button>
+                            <button class="action-card" id="sync-files-btn2"><div class="ai"><svg class="ic"><use href="#i-cloud"/></svg></div><b>同步文件</b><span>强制同步所有变化</span></button>
+                        </div>
+                    </div>
+                    <div class="progress-line" id="sync-progress-container">
+                        <span class="pc" id="progress-percent">0%</span>
+                        <div class="bar"><i id="progress-bar" style="width:0%"></i></div>
+                        <span class="pt" id="progress-text">准备中...</span>
+                    </div>
+                    <div id="sync-status-content" class="pad" style="padding-top:0"></div>
+                </div>
+
+                <div id="webdav-config-guide" class="glass" style="margin-bottom:14px">
+                    <div class="empty-state">
+                        <h3 style="font-size:15px;color:var(--text);margin-bottom:8px">云端同步未开启</h3>
+                        配置 WebDAV 后，可跨设备同步歌单与配置，并享受云端自动备份。<br>WebDAV 连接参数在「设置 · 存储备份」Tab 中配置。
+                        <div><button class="pill" onclick="app.jumpToWebDAVConfig()"><svg class="ic"><use href="#i-cloud"/></svg> 去配置 WebDAV</button></div>
+                    </div>
+                </div>
+
+                <div class="glass" id="webdav-logs-section">
+                    <div class="sec-hd"><h4>最近同步日志</h4><span>增量与全量记录</span></div>
+                    <div class="pad" id="sync-logs-content"><p style="color:var(--muted)">暂无日志</p></div>
+                </div>
+            </section>
+
+            <!-- ============ 快照 ============ -->
+            <section class="view hidden" id="view-snapshots">
+                <div class="crumb">Server / <b>快照</b></div>
+                <div class="vhd">
+                    <div><h2>快照备份</h2><div class="sub">按用户管理数据快照，支持下载 / 回滚 / 上传</div></div>
+                    <div class="acts">
+                        <div class="usel" id="snapshot-user-selector">
+                            <button class="usel-trigger" onclick="app.toggleUserDropdown('snapshot')"><svg class="ic"><use href="#i-user"/></svg><span class="usel-label">选择用户</span><svg class="ic" style="width:12px;height:12px"><use href="#i-chev"/></svg></button>
+                            <div class="usel-menu hidden" id="snapshot-user-menu"></div>
+                        </div>
+                        <input type="hidden" id="snapshot-user-select" value="">
+                        <input type="file" id="snapshot-upload-input" class="hidden" accept=".json">
+                        <button class="pill ghost" onclick="app.triggerUploadSnapshot()"><svg class="ic"><use href="#i-up"/></svg> 上传快照</button>
+                        <button class="pill ghost" onclick="app.loadSnapshots()"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+                    </div>
+                </div>
+                <div class="table" id="snapshots-table">
+                    <div class="trow hd snap-row"><span>快照</span><span>大小</span><span>类型</span><span style="text-align:right">操作</span></div>
+                    <div id="snapshots-list"></div>
+                </div>
+            </section>
+
+            <!-- ============ 日志 ============ -->
+            <section class="view hidden" id="view-logs">
+                <div class="crumb">Server / <b>日志</b></div>
+                <div class="vhd">
+                    <div><h2>运行日志</h2><div class="sub">最近 200 行 · 按类型过滤</div></div>
+                    <div class="acts">
+                        <button class="pill ghost" id="refresh-logs-btn"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+                    </div>
+                </div>
+                <div class="usel" id="log-type-selector" style="margin-bottom:14px">
+                    <button class="usel-trigger" onclick="app.toggleLogTypeDropdown()"><svg class="ic"><use href="#i-log"/></svg><span class="usel-label" id="log-type-label">应用日志</span><svg class="ic" style="width:12px;height:12px"><use href="#i-chev"/></svg></button>
+                    <div class="usel-menu hidden" id="log-type-menu">
+                        <div class="usel-item on" data-v="app" onclick="app.selectLogType('app')">应用日志</div>
+                        <div class="usel-item" data-v="access" onclick="app.selectLogType('access')">访问日志</div>
+                        <div class="usel-item" data-v="login" onclick="app.selectLogType('login')">登录日志</div>
+                        <div class="usel-item" data-v="token" onclick="app.selectLogType('token')">Token 日志</div>
+                        <div class="usel-item" data-v="errors" onclick="app.selectLogType('errors')">错误日志</div>
+                    </div>
+                </div>
+                <div class="log" id="logs-content"></div>
+            </section>
+
+            <!-- ============ 文件 ============ -->
+            <section class="view hidden" id="view-files">
+                <div class="crumb">Server / <b>文件</b></div>
+                <div class="vhd">
+                    <div><h2>文件管理</h2><div class="sub">服务器数据目录</div></div>
+                    <div class="acts">
+                        <button class="pill ghost" id="new-file-btn"><svg class="ic"><use href="#i-file"/></svg> 新建文件</button>
+                        <button class="pill ghost" id="new-folder-btn"><svg class="ic"><use href="#i-folder"/></svg> 新建文件夹</button>
+                        <button class="pill ghost" id="refresh-files-btn"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+                        <button class="pill" id="open-fm-btn"><svg class="ic"><use href="#i-folder"/></svg> 高级文件管理器</button>
+                    </div>
+                </div>
+                <div style="margin-bottom:12px;font-size:12px;color:var(--text2)" id="file-breadcrumb"></div>
+                <div class="fm">
+                    <div class="table" style="height:fit-content">
+                        <div class="trow hd fm-row"><span>名称</span><span>大小</span><span>修改时间</span><span>类型</span><span></span></div>
+                        <div id="file-items"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ 播放器（暂缓） ============ -->
+            <section class="view hidden" id="view-music">
+                <div class="crumb">Server / <b>播放器</b></div>
+                <div class="vhd">
+                    <div><h2>Web 播放器</h2><div class="sub">NextMusic HD · 独立 Web 播放器</div></div>
+                    <div class="acts"><button class="pill ghost" id="open-player-btn">打开独立页面</button></div>
+                </div>
+                <div class="deferred">
+                    <div class="d-art">
+                        <svg viewBox="0 0 320 320" aria-hidden="true">
+                            <defs><clipPath id="df-clip"><rect width="320" height="320" rx="72"/></clipPath></defs>
+                            <g clip-path="url(#df-clip)">
+                                <rect width="320" height="320" fill="#020805"/>
+                                <path d="M134.4 72.5954C134.4 66.1954 139.2 64.5954 144 69.3954L166.4 91.7954V206.995C166.4 234.195 145.6 253.395 116.8 253.395C89.5999 253.395 70.3999 235.795 70.3999 211.795C70.3999 187.795 89.5999 170.195 116.8 170.195C123.2 170.195 129.6 171.795 134.4 173.395V72.5954Z" fill="#1ED760"/>
+                                <path d="M179.2 112.595L208 139.795V218.195C208 232.595 201.6 238.995 193.6 238.995C184 238.995 179.2 232.595 179.2 219.795V112.595Z" fill="#6BE88F"/>
+                                <path d="M220.8 152.595L249.6 179.795V218.195C249.6 232.595 243.2 238.995 235.2 238.995C225.6 238.995 220.8 232.595 220.8 219.795V152.595Z" fill="#6BE88F"/>
+                            </g>
+                        </svg>
+                    </div>
+                    <h3>Web 播放器 · 本轮不开发</h3>
+                    <p>服务端控制台仅保留播放器入口，Web 播放器使用独立的 NextMusic HD 界面<br>点击下方按钮即可打开</p>
+                    <button class="pill" id="open-player-btn2"><svg class="ic"><use href="#i-play"/></svg> 打开播放器</button>
+                </div>
+            </section>
+
+            <!-- ============ 关于 ============ -->
+            <section class="view hidden" id="view-about">
+                <div class="crumb">Server / <b>关于</b></div>
+                <div class="vhd">
+                    <div><h2>关于</h2><div class="sub">版本与开源信息</div></div>
+                    <div class="acts"><button class="pill ghost" id="install-pwa-btn" style="display:none"><svg class="ic"><use href="#i-down"/></svg> 安装 PWA</button></div>
+                </div>
+                <div class="glass">
+                    <div class="about-hero">
+                        <div class="a-art">
+                            <svg viewBox="0 0 320 320" aria-hidden="true">
+                                <defs><clipPath id="ab-clip"><rect width="320" height="320" rx="72"/></clipPath></defs>
+                                <g clip-path="url(#ab-clip)">
+                                    <rect width="320" height="320" fill="#020805"/>
+                                    <path d="M134.4 72.5954C134.4 66.1954 139.2 64.5954 144 69.3954L166.4 91.7954V206.995C166.4 234.195 145.6 253.395 116.8 253.395C89.5999 253.395 70.3999 235.795 70.3999 211.795C70.3999 187.795 89.5999 170.195 116.8 170.195C123.2 170.195 129.6 171.795 134.4 173.395V72.5954Z" fill="#1ED760"/>
+                                    <path d="M179.2 112.595L208 139.795V218.195C208 232.595 201.6 238.995 193.6 238.995C184 238.995 179.2 232.595 179.2 219.795V112.595Z" fill="#6BE88F"/>
+                                    <path d="M220.8 152.595L249.6 179.795V218.195C249.6 232.595 243.2 238.995 235.2 238.995C225.6 238.995 220.8 232.595 220.8 219.795V152.595Z" fill="#6BE88F"/>
+                                </g>
+                            </svg>
+                        </div>
+                        <h3>NextMusic Server</h3>
+                        <div class="as">你的音乐，你的服务器</div>
+                    </div>
+                    <div class="kv">
+                        <div class="k"><span>核心版本</span><b id="about-version">-</b></div>
+                        <div class="k"><span>构建哈希</span><b id="about-build">-</b></div>
+                        <div class="k"><span>服务器名称</span><b id="about-servername">-</b></div>
+                        <div class="k"><span>已运行</span><b id="about-uptime">-</b></div>
+                        <div class="k"><span>同步连接</span><b id="about-devices">-</b></div>
+                        <div class="k"><span>PWA</span><b><button class="mini" id="about-pwa-btn">安装到桌面</button></b></div>
+                    </div>
+                    <div class="about-doc" id="about-content"><p>加载中...</p></div>
+                    <div class="about-actions">
+                        <button class="pill ghost" onclick="app.checkForUpdates()"><svg class="ic"><use href="#i-refresh"/></svg> 检查版本更新</button>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>

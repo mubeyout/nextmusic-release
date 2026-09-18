@@ -55,7 +55,7 @@
 | 端 | 形态 |
 |----|------|
 | 📱 手机 / 平板 | Android App |
-| 📺 TV / 盒子 | Android HD 版（遥控器适配） |
+| 📺 TV / 盒子 / 车机 | Android HD 版（遥控器适配；Android 车机可直接安装） |
 | 💻 桌面 | Linux / macOS 客户端 |
 | 🌐 浏览器 | 服务器自带 Web 播放器，开网页就听 |
 
@@ -71,7 +71,7 @@
 - 🐳 **Docker**（NAS / 服务器 / 家庭主机）：提供 Dockerfile，`docker build` 一条命令起服务
 - 💻 **桌面版内置服务器**（🚧 即将支持）：客户端 + 服务器 all-in-one，零 Docker 零 NAS，一台电脑 = 全家音乐中枢
 
-> 🚧 **即将支持**：桌面即服务器、跨设备断点续播、逐字歌词、智能离线、主题皮肤。
+> 🚧 **即将支持**：桌面即服务器、跨设备断点续播、逐字歌词、智能离线、主题皮肤、车机深度适配（通勤歌单一键缓存）。
 
 ## 💚 免费 vs Pro
 
@@ -116,7 +116,7 @@
 | 平台 | 包 |
 |------|-----|
 | Android 手机 / 平板 | universal · arm64-v8a · armeabi-v7a · x86_64 APK |
-| Android TV / 盒子（HD 版） | 同上 |
+| Android TV / 盒子 / 车机（HD 版） | 同上 |
 | Linux 桌面 | deb · AppImage |
 | macOS | 🚧 dmg 即将提供 |
 | 服务器（后台） | 🐳 Docker（Dockerfile 自构建；镜像与服务端仓库即将公开，文档随后上线） |

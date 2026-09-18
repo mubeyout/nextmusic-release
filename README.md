@@ -19,22 +19,22 @@
 
 还有：黑胶沉浸播放页、匿名可用不强制注册、深色统一视觉。
 
-## 📸 界面一览
+## 📸 四块屏幕，一套体验
 
-<p align="center">
 <table>
 <tr>
-<td align="center"><img src="assets/screens/player.png" width="260"><br><sub>黑胶沉浸播放页</sub></td>
-<td align="center"><img src="assets/screens/home.png" width="260"><br><sub>首页</sub></td>
-<td align="center"><img src="assets/screens/explore.png" width="260"><br><sub>探索 · 榜单广场</sub></td>
+<td width="474"><img src="assets/screens/tv-player.png" width="474" alt="TV 黑胶播放页"><br><sub><b>播放的仪式感</b> · TV 黑胶播放页</sub></td>
+<td width="474"><img src="assets/screens/desktop-web.png" width="474" alt="Web 播放器·探索页"><br><sub><b>桌面原生体验</b> · Web 播放器</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="assets/screens/fx.png" width="260"><br><sub>均衡器与音效</sub></td>
-<td align="center"><img src="assets/screens/media-libraries.png" width="260"><br><sub>远程媒体库接入</sub></td>
-<td align="center"><img src="assets/screens/server.png" width="260"><br><sub>连接自托管服务器</sub></td>
+<td width="474"><img src="assets/screens/hd-media.png" width="474" alt="HD 媒体库封面网格"><br><sub><b>接入你的曲库</b> · HD 媒体库</sub></td>
+<td width="474"><img src="assets/screens/tv-fx.png" width="474" alt="10 段 EQ 音效"><br><sub><b>看得见的专业</b> · 10 段 EQ 音效</sub></td>
+</tr>
+<tr>
+<td width="210"><img src="assets/screens/phone-home.png" width="200" alt="手机首页"><br><sub><b>你的音乐主页</b> · 手机</sub></td>
+<td><img src="assets/screens/phone-explore.png" width="200" alt="手机探索页"><br><sub><b>探索好音乐</b> · 手机</sub></td>
 </tr>
 </table>
-</p>
 
 ## 🧰 功能一览
 

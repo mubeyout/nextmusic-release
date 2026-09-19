@@ -498,3 +498,8 @@ input[type=number].inp { padding-right: 14px; }
 .frow .field { margin: 0; }
 /* 根修 frow 内 12px 偏移: .cfg .field+.field 兄弟选择器误伤双列网格右列(f2 margin-top:12px) */
 .frow .field + .field, .frow .field { margin-top: 0 !important; }
+
+/* [hotfix 20260919 MOMO] 弹窗层样式（后台重建时缺失） */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 20px; }
+.modal-card { background: var(--surface2); border: 1px solid var(--surface3); border-radius: 14px; padding: 20px 22px; width: min(480px, 92vw); box-shadow: 0 16px 48px rgba(0,0,0,.5); max-height: 86vh; overflow-y: auto; }
+.modal-card h3 { margin: 0 0 14px; font-size: 15px; font-weight: 600; color: var(--text); }

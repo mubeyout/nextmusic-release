@@ -685,6 +685,35 @@
         </main>
     </div>
 
+    <!-- [hotfix 20260919 MOMO] 后台重建时弹窗骨架遗失，致新增/改密/配置/删除/批量删按钮静默抛错 -->
+    <div id="modal" class="modal hidden"><div class="modal-card"><h3 id="modal-title"></h3><div id="modal-body"></div></div></div>
+
+    <div id="edit-password-modal" class="modal hidden"><div class="modal-card">
+        <h3>修改密码</h3>
+        <div class="field"><label>新密码</label><input type="password" id="edit-password-input" class="inp" placeholder="新密码"></div>
+        <div class="cfg-btns" style="justify-content:flex-end;margin-top:16px">
+            <button class="pill ghost" onclick="document.getElementById('edit-password-modal').classList.add('hidden')">取消</button>
+            <button class="pill" id="save-password-btn">保存</button>
+        </div>
+    </div></div>
+
+    <div id="rename-user-modal" class="modal hidden"><div class="modal-card" style="width:min(560px,94vw)">
+        <h3>用户配置</h3>
+        <div class="field"><label>用户名</label><input type="text" id="rename-user-input" class="inp"></div>
+        <div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="user-custom-dir-enable-toggle"> 启用自定义音乐目录</label></div>
+        <div id="user-custom-dir-container" class="hidden">
+            <div class="field"><label>目录路径</label><input type="text" id="user-custom-dir-input" class="inp" placeholder="/path/to/music"></div>
+            <div class="field"><span id="user-custom-dir-status" style="font-size:11.5px;color:var(--muted)"></span></div>
+            <div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="user-custom-dir-operate-toggle"> 允许用户操作目录</label></div>
+            <div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="user-custom-dir-write-toggle"> 允许用户写入目录</label></div>
+            <button class="pill ghost" id="test-user-custom-dir-btn" type="button">检测目录</button>
+        </div>
+        <div class="cfg-btns" style="justify-content:flex-end;margin-top:16px">
+            <button class="pill ghost" onclick="document.getElementById('rename-user-modal').classList.add('hidden')">取消</button>
+            <button class="pill" id="save-rename-user-btn">保存</button>
+        </div>
+    </div></div>
+
     <script src="app.js"></script>
 </body>
 

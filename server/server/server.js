@@ -1002,6 +1002,12 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 if ((activePrefix === '/' || activePrefix === '') && subPath.startsWith('/music/')) {
                     targetPath = subPath.slice(1);
                 }
+                else if ((activePrefix === '/' || activePrefix === '') && (subPath === '/music-phone' || subPath.startsWith('/music-phone/'))) {
+                    // [KAI 20260919] 双形态手机版 web(/music-phone/):独立目录直serve,目录 URL 解析 index.html(修 404);
+                    // 走播放器分支=与 HD 同享登录门(原先经通用兜底绕过了门)
+                    const rest = subPath.slice('/music-phone'.length);
+                    targetPath = (rest === '' || rest === '/') ? 'music-phone/index.html' : 'music-phone' + rest;
+                }
                 else {
                     targetPath = node_path_1.default.posix.join('music', subPath.startsWith('/') ? subPath.slice(1) : subPath);
                 }

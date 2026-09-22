@@ -56,7 +56,7 @@
 |----|------|
 | 📱 手机 / 平板 | Android App |
 | 📺 TV / 盒子 / 车机 | Android HD 版（遥控器适配；Android 车机可直接安装，深度适配即将） |
-| 💻 桌面 | Linux 客户端（macOS 🚧 即将提供） |
+| 💻 桌面 | Windows / Linux / macOS（Apple Silicon + Intel）客户端 |
 | 🌐 浏览器 | 服务器自带 Web 播放器，开网页就听 |
 
 **后台（NextMusic Server）**——免费自托管的私有音乐云：
@@ -133,8 +133,9 @@ NextMusic 是独立开发的音乐产品：客户端为独立代码库（React N
 |------|-----|
 | Android 手机 / 平板 | universal · arm64-v8a · armeabi-v7a · x86_64 APK |
 | Android TV / 盒子 / 车机（HD 版） | 同上 |
+| Windows | exe 安装包 |
 | Linux 桌面 | deb · AppImage |
-| macOS | 🚧 dmg 即将提供 |
+| macOS（Apple Silicon / Intel） | dmg（未签名，安装后执行 `xattr -cr /Applications/NextMusic.app` 解除隔离） |
 | 服务器（后台） | 🐳 Docker（Dockerfile 自构建；服务端部署文档随后上线） |
 
 👉 客户端前往 [**Releases**](../../releases) 获取最新版本。App 内置更新通道，保持默认即可自动收到新版本。

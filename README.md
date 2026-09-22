@@ -139,6 +139,8 @@ NextMusic 是独立开发的音乐产品：客户端为独立代码库（React N
 
 👉 客户端前往 [**Releases**](../../releases) 获取最新版本。App 内置更新通道，保持默认即可自动收到新版本。
 
+> 🧑‍💻 本仓库只发布编译好的应用与服务器镜像产物；项目源码在 **[mubeyout/nextmusic](https://github.com/mubeyout/nextmusic)**。
+
 ---
 
 NextMusic · 免费无广告，Pro ¥38 终身 · [☕ 爱发电](https://ifdian.net/a/nextmusic)

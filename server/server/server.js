@@ -898,6 +898,21 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         // console.log(req.url)
         const urlObj = new URL(req.url ?? '', `http://${req.headers.host}`);
         const pathname = urlObj.pathname;
+        // [KAI 20260922] 自托管更新通道:/downloads/* 静态直出(update.json/更新清单/APK)——
+        // release 仓已转私有,GitHub raw/Releases 不再匿名可达,客户端「检查更新」主源改为本路由。
+        // 永久公开(不走播放器登录门:检查更新可能发生在登录前)。目录=staticPath/downloads/
+        if (pathname === '/downloads' || pathname.startsWith('/downloads/')) {
+            const sub = pathname.slice('/downloads'.length);
+            const rel = (sub.startsWith('/') ? sub.slice(1) : sub) || 'index.html';
+            const filePath = node_path_1.default.join(global.lx.staticPath, 'downloads', rel);
+            if (node_fs_1.default.existsSync(filePath) && node_fs_1.default.statSync(filePath).isFile()) {
+                serveStatic(req, res, filePath);
+            } else {
+                res.writeHead(404, { 'Content-Type': 'text/plain' });
+                res.end('Not Found');
+            }
+            return;
+        }
         // 读取路径配置（每次请求都重新读取，保存后立刻生效）
         const normalizePath = (p) => (p || '').replace(/\/+$/, '');
         const playerPath = global.lx.config['player.path'] ?? '/';

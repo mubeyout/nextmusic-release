@@ -1,6 +1,6 @@
 {
-  "versionName": "1.3.1",
-  "versionCode": 157,
-  "notes": "播放优先级:本地→服务器端→音源(跨源同名歌直接播本地,不再走音源取链)\nWebDAV 媒体库 HD/桌面/docker 三端适配\n桌面版 macOS/Windows/Linux 上线;更新渠道回归 GitHub Releases",
-  "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.3.1/NextMusic-phone-1.3.1-vc157-universal.apk"
+  "versionName": "1.3.2",
+  "versionCode": 158,
+  "notes": "修复:mac 桌面端「后台管理」弹「未设定打开 nmapp:// 的应用」\n服务器音源列表:拉取失败/为空不再无声消失,显式提示+重试\n含:播放优先级 本地→服务器端→音源 / WebDAV 三端适配 / 更新渠道走 GitHub Releases",
+  "apkUrl": "https://github.com/mubeyout/nextmusic-release/releases/download/v1.3.2/NextMusic-phone-1.3.2-vc158-universal.apk"
 }

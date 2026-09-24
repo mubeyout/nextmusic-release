@@ -61,6 +61,7 @@ const fileCache = __importStar(require("./fileCache"));
 const customMusicManager = __importStar(require("./customMusicManager"));
 const libraryAgg = __importStar(require("./libraryAgg")); // 我的曲库聚合(0924 一等公民 P1)
 const sharedLib = __importStar(require("./sharedLib")); // 共享媒体库(P2 0924)
+const license = __importStar(require("./licenseCore")); // License 底座(老板 0924 全案)
 const serverDownloadQueue = __importStar(require("./serverDownloadQueue"));
 const remasterQueue = __importStar(require("./remasterQueue"));
 const downloadQuality_1 = require("./downloadQuality");
@@ -3768,6 +3769,101 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     customMusicManager.serveCustomFile(req, res, rawFilename, fileOwner);
                     return;
                 }
+            }
+            // L. License 底座(0924 老板全案:Ed25519/TOFU/两态/永不轮换)
+            if (pathname.startsWith('/api/license/') || pathname.startsWith('/api/admin/license')) {
+                // ── admin:发放/列表/吊销(x-frontend-auth,人工发放链路:爱发电→后台发 key) ──
+                if (pathname.startsWith('/api/admin/license')) {
+                    const auth = req.headers['x-frontend-auth'];
+                    if (auth !== global.lx.config['frontend.password']) {
+                        res.writeHead(401, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                        return;
+                    }
+                    const sub = pathname.slice('/api/admin/license'.length);
+                    if (req.method === 'GET' && (sub === '' || sub === '/')) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: license.readAll() }));
+                        return;
+                    }
+                    if (req.method === 'POST' && (sub === '' || sub === '/')) {
+                        void readBody(req).then(body => {
+                            try {
+                                const lic = license.createLicense(JSON.parse(body) || {});
+                                res.writeHead(200, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ success: true, data: lic }));
+                            }
+                            catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: String(e && e.message || e) })); }
+                        });
+                        return;
+                    }
+                    if (req.method === 'DELETE') {
+                        const key = urlObj.searchParams.get('key');
+                        const ok = key && license.revoke(key);
+                        res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: !!ok }));
+                        return;
+                    }
+                    res.writeHead(404); res.end(); return;
+                }
+                // ── 用户侧(x-user-token) ──
+                const verified = (0, exports.verifyUserAuth)(req);
+                if (!verified) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                    return;
+                }
+                const sub = pathname.slice('/api/license/'.length);
+                // 公钥(TOFU:客户端首次激活锁定)
+                if (sub === 'pubkey' && req.method === 'GET') {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: { alg: 'ed25519', pubkey: license.publicKeyB64() } }));
+                    return;
+                }
+                // 激活:绑账号+登记设备+发签名 entitlement
+                if (sub === 'activate' && req.method === 'POST') {
+                    void readBody(req).then(body => {
+                        try {
+                            const { key, installId, deviceName } = JSON.parse(body);
+                            if (!key || !installId) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Missing key/installId' })); return; }
+                            const r = license.activate(String(key).trim(), verified, String(installId), String(deviceName || ''));
+                            if (!r.ok) { res.writeHead(r.code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: r.reason })); return; }
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true, data: r.ent }));
+                        }
+                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Invalid JSON' })); }
+                    });
+                    return;
+                }
+                // 复核(离线宽限期后/定期)
+                if (sub === 'revalidate' && req.method === 'POST') {
+                    void readBody(req).then(body => {
+                        try {
+                            const { key, installId } = JSON.parse(body);
+                            const r = license.revalidate(String(key || ''), verified, String(installId || ''));
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: r.ok, message: r.reason, data: license.byAccount(verified) }));
+                        }
+                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false })); }
+                    });
+                    return;
+                }
+                // 我的 license + 设备管理
+                if (sub === 'me' && req.method === 'GET') {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: license.byAccount(verified) }));
+                    return;
+                }
+                if (sub.startsWith('devices/') && req.method === 'DELETE') {
+                    const parts = sub.split('/'); // devices/<key>/<installId>
+                    const ok = parts.length === 3 && license.removeDevice(decodeURIComponent(parts[1]), decodeURIComponent(parts[2]));
+                    res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: !!ok }));
+                    return;
+                }
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Unknown license endpoint' }));
+                return;
             }
             // F0. 共享媒体库管理(P2 admin,管理员工具——自托管全能力;人数/商用约束在授权层不在代码)
             if (pathname === '/api/admin/sharedlib' || pathname.startsWith('/api/admin/sharedlib/')) {

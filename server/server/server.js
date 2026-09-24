@@ -60,6 +60,7 @@ const customSourceHandlers = __importStar(require("./customSourceHandlers"));
 const fileCache = __importStar(require("./fileCache"));
 const customMusicManager = __importStar(require("./customMusicManager"));
 const libraryAgg = __importStar(require("./libraryAgg")); // 我的曲库聚合(0924 一等公民 P1)
+const sharedLib = __importStar(require("./sharedLib")); // 共享媒体库(P2 0924)
 const serverDownloadQueue = __importStar(require("./serverDownloadQueue"));
 const remasterQueue = __importStar(require("./remasterQueue"));
 const downloadQuality_1 = require("./downloadQuality");
@@ -3756,16 +3757,135 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         res.end('Unauthorized');
                         return;
                     }
-                    customMusicManager.serveCustomFile(req, res, rawFilename, verified);
+                    // P2 共享媒体库:?lib=<id> → 流播路由到共享库目录(权限校验同聚合层)
+                    const libParamF = urlObj.searchParams.get('lib');
+                    let fileOwner = verified;
+                    if (libParamF) {
+                        const r = sharedLib.resolveAccess(libParamF, verified);
+                        if (!r.ok) { res.writeHead(r.code); res.end(r.reason); return; }
+                        fileOwner = r.ownerKey;
+                    }
+                    customMusicManager.serveCustomFile(req, res, rawFilename, fileOwner);
                     return;
                 }
             }
+            // F0. 共享媒体库管理(P2 admin,管理员工具——自托管全能力;人数/商用约束在授权层不在代码)
+            if (pathname === '/api/admin/sharedlib' || pathname.startsWith('/api/admin/sharedlib/')) {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                    return;
+                }
+                const sub = pathname.slice('/api/admin/sharedlib'.length);
+                const isAdminPath = (p) => p === '' || p === '/';
+                // GET 列表
+                if (req.method === 'GET' && isAdminPath(sub)) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: sharedLib.readLibs() }));
+                    return;
+                }
+                // POST 新建
+                if (req.method === 'POST' && isAdminPath(sub)) {
+                    void readBody(req).then(body => {
+                        try {
+                            const lib = JSON.parse(body);
+                            const err = sharedLib.validateLib(lib);
+                            if (err) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: err })); return; }
+                            const libs = sharedLib.readLibs();
+                            if (libs.some(l => l.id === lib.id)) { res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'id 已存在' })); return; }
+                            libs.push({ id: lib.id, name: lib.name || lib.id, dir: lib.dir, access: lib.access || 'allow', allowList: lib.allowList || [], enabled: true });
+                            sharedLib.saveLibs(libs);
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true }));
+                        }
+                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Invalid JSON' })); }
+                    });
+                    return;
+                }
+                // PUT 改(id 在 body)
+                if (req.method === 'PUT' && isAdminPath(sub)) {
+                    void readBody(req).then(body => {
+                        try {
+                            const patch = JSON.parse(body);
+                            if (!patch.id) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Missing id' })); return; }
+                            const libs = sharedLib.readLibs();
+                            const idx = libs.findIndex(l => l.id === patch.id);
+                            if (idx === -1) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Not found' })); return; }
+                            const merged = { ...libs[idx], ...patch, id: libs[idx].id };
+                            const err = sharedLib.validateLib({ ...merged, access: merged.access, allowList: merged.allowList });
+                            if (err) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: err })); return; }
+                            libs[idx] = merged;
+                            sharedLib.saveLibs(libs);
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true }));
+                        }
+                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Invalid JSON' })); }
+                    });
+                    return;
+                }
+                // DELETE ?id=
+                if (req.method === 'DELETE' && isAdminPath(sub)) {
+                    const id = urlObj.searchParams.get('id');
+                    if (!id) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Missing id' })); return; }
+                    const libs = sharedLib.readLibs().filter(l => l.id !== id);
+                    sharedLib.saveLibs(libs);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true }));
+                    return;
+                }
+                // POST /:id/sync 扫描(管理员手动;扫描后回填 songCountHint)
+                const m = sub.match(/^\/([a-z0-9_-]+)\/sync$/i);
+                if (req.method === 'POST' && m) {
+                    (async () => {
+                        try {
+                            const libs = sharedLib.readLibs();
+                            const lib = libs.find(l => l.id === m[1]);
+                            if (!lib) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Not found' })); return; }
+                            await customMusicManager.syncCustomIndex('shared_' + lib.id);
+                            libraryAgg.invalidate('shared_' + lib.id);
+                            const st = libraryAgg.stats('shared_' + lib.id);
+                            lib.songCountHint = st.songs;
+                            lib.syncedAt = Date.now();
+                            sharedLib.saveLibs(libs);
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true, data: st }));
+                        }
+                        catch (e) {
+                            res.writeHead(500, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, message: String(e && e.message || e) }));
+                        }
+                    })();
+                    return;
+                }
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Unknown sharedlib endpoint' }));
+                return;
+            }
             // F. 「我的曲库」聚合层(老板 0924 一等公民 P1):基于 custom_index 的艺/专/最近/随机——token 鉴权与 custom 系一致
+            // P2:支持 ?lib=<id> 路由到共享媒体库(owner='shared_<id>',权限白名单/公开;锁态 403 携带库信息供锁卡渲染)
             if (pathname.startsWith('/api/music/library/')) {
                 const verified = (0, exports.verifyUserAuth)(req);
                 if (!verified) {
                     res.writeHead(401, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                    return;
+                }
+                // 库解析:无 lib=私人库(默认);有 lib=共享库(权限校验)
+                const libParam = urlObj.searchParams.get('lib');
+                let owner = verified;
+                let libDenied = null;
+                if (libParam) {
+                    const r = sharedLib.resolveAccess(libParam, verified);
+                    if (!r.ok) {
+                        libDenied = { code: r.code, reason: r.reason, name: (r.lib && r.lib.name) || libParam, songCountHint: (r.lib && r.lib.songCountHint) || 0 };
+                    }
+                    else
+                        owner = r.ownerKey;
+                }
+                if (libDenied) {
+                    res.writeHead(libDenied.code, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: libDenied.reason, lock: libDenied }));
                     return;
                 }
                 const sub = pathname.slice('/api/music/library/'.length);
@@ -3778,32 +3898,36 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     return Number.isFinite(v) && v >= 0 ? v : d;
                 };
                 try {
+                    if (sub === 'shared/list' && req.method === 'GET') {
+                        ok({ data: { libs: sharedLib.listForUser(verified) } });
+                        return;
+                    }
                     if (sub === 'artists' && req.method === 'GET') {
-                        ok({ data: libraryAgg.listArtists(verified, { offset: num('offset', 0), limit: num('limit', 0) }) });
+                        ok({ data: libraryAgg.listArtists(owner, { offset: num('offset', 0), limit: num('limit', 0) }) });
                         return;
                     }
                     if (sub === 'artist' && req.method === 'GET') {
-                        const r = libraryAgg.getArtist(verified, urlObj.searchParams.get('id') || '');
+                        const r = libraryAgg.getArtist(owner, urlObj.searchParams.get('id') || '');
                         if (!r) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Artist not found' })); return; }
                         ok({ data: r });
                         return;
                     }
                     if (sub === 'albums' && req.method === 'GET') {
-                        ok({ data: libraryAgg.listAlbums(verified, { type: urlObj.searchParams.get('type') || 'newest', size: num('size', 60), offset: num('offset', 0) }) });
+                        ok({ data: libraryAgg.listAlbums(owner, { type: urlObj.searchParams.get('type') || 'newest', size: num('size', 60), offset: num('offset', 0) }) });
                         return;
                     }
                     if (sub === 'album' && req.method === 'GET') {
-                        const r = libraryAgg.getAlbum(verified, urlObj.searchParams.get('id') || '');
+                        const r = libraryAgg.getAlbum(owner, urlObj.searchParams.get('id') || '');
                         if (!r) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Album not found' })); return; }
                         ok({ data: r });
                         return;
                     }
                     if (sub === 'songs' && req.method === 'GET') {
-                        ok({ data: libraryAgg.listSongs(verified, { type: urlObj.searchParams.get('type') || 'recent', size: num('size', 30) }) });
+                        ok({ data: libraryAgg.listSongs(owner, { type: urlObj.searchParams.get('type') || 'recent', size: num('size', 30) }) });
                         return;
                     }
                     if (sub === 'stats' && req.method === 'GET') {
-                        ok({ data: libraryAgg.stats(verified) });
+                        ok({ data: libraryAgg.stats(owner) });
                         return;
                     }
                     res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -3837,7 +3961,15 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     res.end('Missing filename');
                     return;
                 }
-                const cover = await customMusicManager.getCustomCover(filename, verified);
+                // P2 共享媒体库:封面同 lib 路由
+                const libParamC = urlObj.searchParams.get('lib');
+                let coverOwner = verified;
+                if (libParamC) {
+                    const r = sharedLib.resolveAccess(libParamC, verified);
+                    if (!r.ok) { res.writeHead(r.code); res.end(r.reason); return; }
+                    coverOwner = r.ownerKey;
+                }
+                const cover = await customMusicManager.getCustomCover(filename, coverOwner);
                 if (cover && cover.data) {
                     res.writeHead(200, {
                         'Content-Type': cover.mime || 'image/jpeg',

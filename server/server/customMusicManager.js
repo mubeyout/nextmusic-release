@@ -52,6 +52,22 @@ const fileCache = __importStar(require("./fileCache"));
 const getCustomMusicDir = (username) => {
     if (!username || username === '_open' || username === 'default')
         return null;
+    // [P2 共享媒体库 0924] owner 泛化:'shared_<libId>' 前缀路由到共享库目录(config.sharedLibraries)——
+    // 扫描/索引/聚合/流播全链自动兼容(都走本函数);权限校验在路由层独立做,这里只解析目录
+    if (String(username).startsWith('shared_')) {
+        try {
+            const libId = String(username).slice('shared_'.length);
+            const libs = (global.lx.config.sharedLibraries || []);
+            const lib = libs.find(l => l.id === libId && l.enabled !== false);
+            if (lib && lib.dir) {
+                const resolved = path_1.default.resolve(lib.dir);
+                if (fs_1.default.existsSync(resolved))
+                    return resolved;
+            }
+        }
+        catch (e) { /* 配置异常当无目录 */ }
+        return null;
+    }
     try {
         const userCfg = (0, user_1.getUserConfig)(username);
         if (userCfg?.enableCustomMusicDir && userCfg?.customMusicDir) {

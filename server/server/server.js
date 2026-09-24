@@ -640,6 +640,8 @@ function onSocketError(err) {
     console.error(err);
 }
 const saveUsers = () => {
+    // [R2⚠️ 0924 走查实锤] 双源治理:①users.json 补齐 allowWriteCustomMusicDir(原漏字段→重启丢写权限)
+    // ②同步 saveConfig() 落盘 config.js——双源(config.js/users.json)永远一致,升级/重启不丢用户配置
     const usersJsonPath = node_path_1.default.join(global.lx.dataPath, 'users.json');
     try {
         node_fs_1.default.writeFileSync(usersJsonPath, JSON.stringify(global.lx.config.users.map(u => ({
@@ -650,7 +652,10 @@ const saveUsers = () => {
             enableCustomMusicDir: u.enableCustomMusicDir,
             customMusicDir: u.customMusicDir,
             allowOperateCustomMusicDir: u.allowOperateCustomMusicDir,
+            allowWriteCustomMusicDir: u.allowWriteCustomMusicDir,
         })), null, 2));
+        if (typeof global.lx.saveConfig === 'function')
+            global.lx.saveConfig(); // users 也在 config.js 里——同步落盘,双源一致
         return true;
     }
     catch (err) {

@@ -48,16 +48,18 @@ function publicKeyB64() {
 
 // ── features 推导(门控口径 0924 定案) ──
 // 客户端 Pro 9 候选 + 服务端门;基础播放/歌词/断点恢复永不入门(红线)
+// canonical 源=NextMusic/shared/benefits.json 的 pro_features.id(MAX 0924 定稿,构建期注入客户端同读)——两套命名对齐于此,禁再分叉
+// 免费层含自托管曲库(selfHostUnlocked=true 全开,部署者权利);library_server 门仅托管平台无 Pro 档生效——两态语义一致
 const TIER_FEATURES = {
-    community: [], // 免费层=上游能力面+免费生态底座
-    pro: ['eq_pro', 'lyrics_pro', 'webdav_backup', 'batch_offline', 'progress_roam', 'theme_store', 'tv_enhance', 'carlink_pro'],
+    community: [], // 免费层=上游能力面+免费生态底座(benefits.free_forever)
+    pro: ['eq_custom', 'lyrics_deep', 'webdav_backup', 'offline_batch', 'progress_roam', 'library_server', 'tv_pack', 'carlink', 'theme_store'],
     family: [], // 由 pro 推导+共享组
     host: ['*'], // 托管 ¥10:Pro 全权益+托管能力(细粒度后续按需收)
 };
 function featuresFor(tier, extra) {
     const base = tier === 'family' ? [...TIER_FEATURES.pro] : [...(TIER_FEATURES[tier] || [])];
     if (tier === 'family')
-        base.push('sharedlib_family');
+        base.push('share_group');
     if (Array.isArray(extra))
         base.push(...extra);
     return base;

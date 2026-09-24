@@ -3687,16 +3687,27 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     }
                     // 有新文件则增量扫描+聚合失效:传完即出现在专辑墙
                     let stats = null;
+                    let byDirSplit = null; // v1.1 完成卡拆分:N 首 ID3 完整 / M 首按文件夹分组
                     if (uploaded.length) {
                         try {
                             await customMusicManager.syncCustomIndex(verified);
                             libraryAgg.invalidate(verified);
                             stats = libraryAgg.stats(verified);
+                            // 新上传歌曲的分组归属:uploaded 名单按 filename 匹配索引,数 byDir 专辑
+                            const idx = customMusicManager.customIndexManager.getAll(verified);
+                            const byName = new Set(uploaded.map(u => u.name));
+                            let id3Full = 0, byDir = 0;
+                            for (const it of idx) {
+                                if (!byName.has(it.filename.split('/').pop())) continue; // uploaded 是 basename,索引 filename 含相对目录
+                                if (String(it.album || '').trim()) id3Full++;
+                                else byDir++;
+                            }
+                            byDirSplit = { id3Full, byDir };
                         }
                         catch (e4) { /* 扫描失败不影响上传结果,客户端可手动刷新 */ }
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: true, uploaded, skipped, failed, stats }));
+                    res.end(JSON.stringify({ success: true, uploaded, skipped, failed, stats, byDirSplit }));
                 });
                 return;
             }

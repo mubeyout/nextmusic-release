@@ -200,14 +200,158 @@ setTimeout(() => {
  * 2. 其次验证持久化 API Token（管理面板产生，需开启账户 Token 功能）
  * 返回已验证的用户名，或 null 表示未认证。
  */
+// [lx173] 音源健康检测:搜索+取链端到端;连续失败计数(内存),达阈值自动禁用并记日志;恢复成功清零。
+// 定时:每 6 小时全量检测(与每日自动更新错开)。手动检测同一核心。
+// [lx173b] 自动更新总开关:config['source.autoUpdate'](默认 true);单源可用 autoUpdate:false 退出。
+const SOURCE_HEALTH_FAIL_LIMIT = 3; // 连续 3 次失败 → 自动禁用
+const sourceHealthFails = new Map(); // id -> 连续失败次数
+async function runSourceHealthCheck(onlyId) {
+    const dataPath0 = process.env.DATA_PATH || node_path_1.default.join(process.cwd(), 'data');
+    const metaP = node_path_1.default.join(dataPath0, 'users', 'source', '_open', 'sources.json');
+    const report = [];
+    if (!node_fs_1.default.existsSync(metaP)) return report;
+    let metas = [];
+    try { metas = JSON.parse(node_fs_1.default.readFileSync(metaP, 'utf-8')); } catch (e) { return report; }
+    let changed = false;
+    for (const m of metas) {
+        if (onlyId && m.id !== onlyId) continue;
+        if (!m.enabled) { report.push({ id: m.id, name: m.name, ok: null, detail: '已禁用(跳过)' }); continue; }
+        const item = { id: m.id, name: m.name, ok: false, detail: '' };
+        try {
+            // 端到端:平台搜索 晴天 → 走共享源取链通道
+            const songs = await new Promise(resolve => {
+                const wyMod = musicSdk['wy'] && musicSdk['wy'].musicSearch; // wy 索引上 musicSearch 是模块对象
+                const searchFn = (wyMod && typeof wyMod.search === 'function') ? wyMod.search : (typeof wyMod === 'function' ? wyMod : null);
+                if (!searchFn) { resolve([]); return; }
+                let settled = false;
+                const done = v => { if (!settled) { settled = true; resolve(v); } };
+                setTimeout(() => done([]), 15000);
+                void Promise.resolve(searchFn.call(wyMod, '晴天 周杰伦', 1, 5)).then(r => done(Array.isArray(r === null || r === void 0 ? void 0 : r.list) ? r.list : [])).catch(() => done([]));
+            });
+            const song = songs[0];
+            if (!song) throw new Error('搜索无结果(平台侧)');
+            const url = await (0, userApi_1.callUserApiGetMusicUrl)('wy', song, '128k', 'mubey', undefined, false);
+            if (url) { item.ok = true; item.detail = `可用 · 《${song.name}》取链成功`; }
+            else throw new Error('取链返回空');
+        }
+        catch (e2) {
+            item.ok = false;
+            item.detail = String((e2 && e2.message) || e2).slice(0, 120);
+        }
+        if (item.ok) {
+            if (sourceHealthFails.has(m.id)) sourceHealthFails.delete(m.id);
+        }
+        else {
+            const n = (sourceHealthFails.get(m.id) || 0) + 1;
+            sourceHealthFails.set(m.id, n);
+            item.detail += ` (连续失败 ${n}/${SOURCE_HEALTH_FAIL_LIMIT})`;
+            if (n >= SOURCE_HEALTH_FAIL_LIMIT) {
+                m.enabled = false; changed = true;
+                sourceHealthFails.delete(m.id);
+                item.detail += ` → 已自动禁用`;
+                console.warn(`[SourceHealth] ${m.name} 连续 ${n} 次检测失败,已自动禁用`);
+            }
+        }
+        report.push(item);
+    }
+    if (changed) { try { node_fs_1.default.writeFileSync(metaP, JSON.stringify(metas, null, 2), 'utf-8'); } catch (e3) { /* ignore */ } }
+    return report;
+}
+function scheduleSourceHealthCheck() {
+    const RUN_MS = 6 * 60 * 60 * 1000;
+    const run = () => void runSourceHealthCheck(null).then(r => {
+        const fails = r.filter(x => x.ok === false).length;
+        if (fails) console.log(`[SourceHealth] 定时检测: ${fails}/${r.length} 个源不可用`);
+    }).catch(() => { });
+    setTimeout(() => void run(), 10 * 60 * 1000); // 启动 10 分钟后首跑(与更新任务 5min 错开)
+    setInterval(run, RUN_MS);
+}
+// [lx172] 音源更新辅助:代拉脚本文本(跟随重定向≤5,12s 超时,5MB 上限) + 版本比较 + 每日自动更新
+function isNewerVer(remote, local) {
+    if (!remote) return false;
+    if (!local) return true;
+    const rd = String(remote).replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
+    const ld = String(local).replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(rd.length, ld.length); i++) {
+        const rv = rd[i] || 0, lv = ld[i] || 0;
+        if (rv > lv) return true;
+        if (rv < lv) return false;
+    }
+    return false;
+}
+function fetchScriptTextForUpdate(targetUrl) {
+    return new Promise((resolve, reject) => {
+        const attempt = (u, depth) => {
+            if (depth > 5) { reject(new Error('重定向过深')); return; }
+            const up = new URL(u);
+            const lib = up.protocol === 'https:' ? require('https') : require('http');
+            const req = lib.get(up, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }, timeout: 12000 }, cres => {
+                if (cres.statusCode >= 300 && cres.statusCode < 400 && cres.headers.location) {
+                    attempt(new URL(cres.headers.location, up).toString(), depth + 1);
+                    return;
+                }
+                if (cres.statusCode !== 200) { reject(new Error('HTTP ' + cres.statusCode)); return; }
+                const chunks = [];
+                let size = 0;
+                cres.on('data', c => { size += c.length; if (size > 5 * 1024 * 1024) { req.destroy(); reject(new Error('脚本过大')); } else chunks.push(c); });
+                cres.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+            });
+            req.on('timeout', () => { req.destroy(); reject(new Error('超时')); });
+            req.on('error', reject);
+        };
+        attempt(targetUrl, 0);
+    });
+}
+// 每日自动更新共享源(逐源:拉→比版本→试加载→覆盖;单源失败只记日志不动旧版;autoUpdate:false 跳过)
+function scheduleSourceAutoUpdate() {
+    const RUN_MS = 24 * 60 * 60 * 1000;
+    const run = async () => {
+        try {
+            const dataPath0 = process.env.DATA_PATH || node_path_1.default.join(process.cwd(), 'data');
+            const metaP = node_path_1.default.join(dataPath0, 'users', 'source', '_open', 'sources.json');
+            if (!node_fs_1.default.existsSync(metaP)) return;
+            let metas = [];
+            try { metas = JSON.parse(node_fs_1.default.readFileSync(metaP, 'utf-8')); } catch (e) { return; }
+            for (const m of metas) {
+                if (m.autoUpdate === false) continue;
+                if (!m.sourceUrl) continue;
+                try {
+                    const script = await fetchScriptTextForUpdate(m.sourceUrl);
+                    if (!script || script.length < 50) continue;
+                    const meta = (0, userApi_1.extractMetadata)(script);
+                    if (!isNewerVer(meta.version || '', m.version)) continue;
+                    const r = await new Promise(resolve2 => {
+                        void (0, userApi_1.loadUserApi)({ id: 'temp_auto_update_' + m.id, script, enabled: false, name: meta.name || m.name, version: meta.version || '1.0.0', author: meta.author || '', description: meta.description || '', allowUnsafeVM: false, owner: 'temp' })
+                            .then(x => resolve2(x)).catch(e2 => resolve2({ success: false, error: String(e2) }));
+                    });
+                    if (!r || !r.success) { console.warn(`[SourceAutoUpdate] ${m.name} 新版试加载失败,保留旧版:`, r && r.error); continue; }
+                    const scriptP = node_path_1.default.join(dataPath0, 'users', 'source', '_open', m.id);
+                    node_fs_1.default.writeFileSync(scriptP, script, 'utf-8');
+                    m.version = meta.version || m.version;
+                    if (meta.name) m.name = meta.name;
+                    if (meta.description) m.description = meta.description;
+                    m.size = Buffer.byteLength(script, 'utf-8');
+                    m.uploadTime = new Date().toISOString();
+                    console.log(`[SourceAutoUpdate] ${m.name} 已更新到 ${m.version}`);
+                }
+                catch (e3) {
+                    console.warn(`[SourceAutoUpdate] ${m.name} 更新检查失败(保留旧版):`, (e3 && e3.message) || e3);
+                }
+            }
+            // 统一写回(仅当有变更;避免无谓触发 watcher)
+            try { node_fs_1.default.writeFileSync(metaP, JSON.stringify(metas, null, 2), 'utf-8'); } catch (e4) { /* ignore */ }
+        }
+        catch (e5) { console.warn('[SourceAutoUpdate] 运行异常:', (e5 && e5.message) || e5); }
+    };
+    const enabled = () => global.lx.config['source.autoUpdate'] !== false; // [lx173b] 总开关,默认开
+    const gated = () => { if (enabled()) return run(); return Promise.resolve(); };
+    setTimeout(() => void gated(), 5 * 60 * 1000); // 启动 5 分钟后首跑(避开启动高峰)
+    setInterval(() => void gated(), RUN_MS);
+}
 const NM_MUSIC_AUTH_PATHS = new Set([
-    '/api/music/search', '/api/music/tipSearch', '/api/music/artistDetail', '/api/music/artistAlbums',
-    '/api/music/artistSongs', '/api/music/albumSongs', '/api/music/url', '/api/music/quality/size',
-    '/api/music/lyric', '/api/music/hotSearch', '/api/music/songList/tags', '/api/music/songList/list',
-    '/api/music/songList/detail', '/api/music/songList/search', '/api/music/songList/userPlaylist',
-    '/api/music/leaderboard/boards', '/api/music/leaderboard/list', '/api/music/comment',
+    '/api/music/url', '/api/music/quality/size',
     '/api/music/download',
-]); // [Gate 2026-09-14] 未登录禁止使用服务器音源(老板指令):musicSdk 全家桶 + 媒体代理
+]); // [lx166 laoban 0923] 分级:浏览免费(search/tipSearch/歌单/榜单/评论/歌词/热搜 全放开);取链与媒体代理仍需登录(音源=账号服务一部分) // [Gate 2026-09-14] 未登录禁止使用服务器音源(老板指令):musicSdk 全家桶 + 媒体代理
 const verifyUserAuth = (req, tokenOverride) => {
     const token = tokenOverride || req.headers['x-user-token'];
     if (token) {
@@ -962,6 +1106,15 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 pathname.startsWith(`${normalizedPrefix}/img/`) ||
                 pathname === `${normalizedPrefix}/manifest.json` ||
                 pathname === `${normalizedPrefix}/sw.js` ||
+                // [v3.31 2026-09-21] 双形态 phone 播放器资产白名单:开密码门后 /music-phone/assets 等
+                // 不在旧 legacy 白名单内被 302 到 /login → phone web 全白屏;补齐(与前缀无关,路径固定)
+                pathname.startsWith('/music-phone/assets/') ||
+                pathname.startsWith('/music-phone/css/') ||
+                pathname.startsWith('/music-phone/js/') ||
+                pathname.startsWith('/music-phone/fonts/') ||
+                pathname.startsWith('/music-phone/img/') ||
+                pathname === '/music-phone/manifest.json' ||
+                pathname === '/music-phone/sw.js' ||
                 isLegacyPlayerAsset;
             // 认证检查
             if (!isLoginPage && !isPublicAsset && global.lx.config['player.enableAuth']) {
@@ -3988,7 +4141,11 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             // [Gate 2026-09-14] 音源接口登录门:nm_auth query 兜底(audio 标签带不了 header,媒体代理专用)
             if (NM_MUSIC_AUTH_PATHS.has(pathname)) {
                 const nmAuthUser = (0, exports.verifyUserAuth)(req) || (urlObj.searchParams.get('nm_auth') ? (0, exports.verifyUserAuth)(req, urlObj.searchParams.get('nm_auth')) : null);
-                if (!nmAuthUser) {
+                // [lx166 laoban 0923] 第三方媒体库不依赖服务器账号:download 匿名放行当且仅当带 h= 自有鉴权头
+                // (Emby Token/WebDAV Basic 由前端携带;服务器只做转发,凭据属于用户自己的媒体库)。
+                // 无 h= 的匿名 download 仍 401(防止变成任意 URL 开放代理/SSRF)。
+                const mediaLibAnon = pathname === '/api/music/download' && !!urlObj.searchParams.get('h');
+                if (!nmAuthUser && !mediaLibAnon) {
                     log4js_1.tokenLog.warn(`[MusicGate] 401 ${pathname} from ${(0, tools_1.getIP)(req)}`);
                     res.writeHead(401, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: false, message: '请先登录账号' }));
@@ -4170,6 +4327,26 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     return;
                 }
                 try {
+                    // [v3.31 2026-09-21] h= 自定义鉴权头(WebDAV Basic / Emby Token 等浏览器 audio 标签带不了的头,服务端代为转发上游)
+                    // 仅放行安全键名子集;本路由已有 nm_auth 登录门,不扩大匿名面
+                    let extraHeaders = null;
+                    const hParam = urlObj.searchParams.get('h');
+                    if (hParam) {
+                        try {
+                            const parsedH = JSON.parse(hParam);
+                            if (parsedH && typeof parsedH === 'object' && !Array.isArray(parsedH)) {
+                                extraHeaders = {};
+                                for (const hk of Object.keys(parsedH)) {
+                                    const hv = parsedH[hk];
+                                    if (/^[A-Za-z0-9-]+$/.test(hk) && typeof hv === 'string' && hv.length < 4096) {
+                                        extraHeaders[hk] = hv;
+                                    }
+                                }
+                                if (!Object.keys(extraHeaders).length) extraHeaders = null;
+                            }
+                        }
+                        catch { /* 非法 h 忽略,按无头处理 */ }
+                    }
                     const isTaggingMode = urlObj.searchParams.get('tag') === '1';
                     const taskId = urlObj.searchParams.get('taskId');
                     console.log(`[DownloadProxy] Fetching: ${urlStr} (Tagging: ${isTaggingMode}, TaskId: ${taskId})`);
@@ -4192,8 +4369,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                                 method: 'GET',
                                 headers: {
                                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                                    'Referer': parsedUrl.origin
-                                }
+                                    'Referer': parsedUrl.origin,
+                                    ...(extraHeaders || {})                                }
                             };
                             // 转发 Range 请求头，以支持播放器的快进和拖拽
                             if (req.headers['range']) {
@@ -4600,7 +4777,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     'user.enablePublicNonAdminAccess': global.lx.config['user.enablePublicNonAdminAccess'] || false,
                     'user.enablePublicNonAdminLocalMusic': global.lx.config['user.enablePublicNonAdminLocalMusic'] || false,
                     'user.enablePublicNonAdminBrowserDownload': global.lx.config['user.enablePublicNonAdminBrowserDownload'] ?? true,
-                    'user.enablePublicNonAdminServerCache': global.lx.config['user.enablePublicNonAdminServerCache'] ?? false
+                    'user.enablePublicNonAdminServerCache': global.lx.config['user.enablePublicNonAdminServerCache'] ?? false,
+                    'source.autoUpdate': global.lx.config['source.autoUpdate'] !== false
                 }));
                 return;
             }
@@ -5342,6 +5520,251 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     }
                 }
             }
+            // [lx171 老板 0923 03:30] 匿名脚本获取:web 端按 URL 添加音源时浏览器跨域被拦(Failed to fetch),
+            // 由服务器代拉。仅放行 http(s) + 响应体走脚本元数据校验;失败原样带回状态码。
+            // 风险面=SSRF:限 5MB、只 GET、不跟随凭据;匿名可用(自定义音源不依赖服务器账号,拉脚本只是下载文本)。
+            // [lx176 老板 0923 07:42] web 沙箱 HTTP 代理:网页端自定义音源脚本的上游调用被浏览器 CORS 拦,
+            // 沙箱 httpReq 桥在 web 形态改走本端点由服务器代发(原生/Electron 不走此路)。
+            // 风险面=SSRF 开放代理:①仅 GET/POST ②限 text 响应 5MB/二进制 8MB ③仅接受 application/json 请求体
+            // ④匿名放行(自定义音源不依赖账号)但可被扫描滥用——挂限速:每 IP 每分钟 120 次(内存桶)。
+            if (pathname === '/api/sandbox/http' && req.method === 'POST') {
+                const rlMap = (globalThis.__sbRl = globalThis.__sbRl || new Map());
+                const ipK = (0, tools_1.getIP)(req);
+                const nowMin = Math.floor(Date.now() / 60000);
+                const rl = rlMap.get(ipK) || { min: nowMin, n: 0 };
+                if (rl.min !== nowMin) { rl.min = nowMin; rl.n = 0; }
+                rl.n++;
+                rlMap.set(ipK, rl);
+                if (rl.n > 120) {
+                    res.writeHead(429, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ err: 'rate limited' }));
+                    return;
+                }
+                void readBody(req).then(body => {
+                    const { url: sUrl, method, headers, body: reqBody } = JSON.parse(body);
+                    if (!sUrl || !(/^https?:\/\//i).test(sUrl)) throw new Error('bad url');
+                    const up = new URL(sUrl);
+                    const lib = up.protocol === 'https:' ? require('https') : require('http');
+                    const h = {};
+                    // 只透传安全头子集( UA/CT/Accept/鉴权类 )
+                    for (const hk of ['User-Agent', 'Content-Type', 'Accept', 'Authorization', 'X-API-Key', 'Cookie', 'Referer']) {
+                        if (headers && headers[hk]) h[hk] = headers[hk];
+                    }
+                    const chunks = [];
+                    let size = 0, doneFlag = false;
+                    const finish = (code, ctype, payload, extraErr) => {
+                        if (doneFlag) return; doneFlag = true;
+                        res.writeHead(code, { 'Content-Type': ctype });
+                        res.end(payload != null ? JSON.stringify({ statusCode: code, bodyText: typeof payload === 'string' ? payload : null, bodyB64: payload, err: extraErr || null, headers: {} }) : JSON.stringify({ err: extraErr || 'fail' }));
+                    };
+                    const rq = lib.request(up, { method: (method || 'GET').toUpperCase() === 'GET' ? 'GET' : 'POST', headers: h, timeout: 15000 }, crs => {
+                        if (crs.statusCode >= 300 && crs.statusCode < 400 && crs.headers.location) {
+                            finish(crs.statusCode, 'application/json', null, 'redirect:' + new URL(crs.headers.location, up).toString());
+                            return;
+                        }
+                        const isBin = !( /text|json|javascript|xml/i.test(crs.headers['content-type'] || '') );
+                        crs.on('data', c => { size += c.length; const cap = isBin ? 8 : 5; if (size > cap * 1024 * 1024) { rq.destroy(); finish(413, 'application/json', null, 'too large'); } else chunks.push(c); });
+                        crs.on('end', () => {
+                            const buf = Buffer.concat(chunks);
+                            if (isBin) finish(crs.statusCode || 0, 'application/json', buf.toString('base64'));
+                            else finish(crs.statusCode || 0, 'application/json', buf.toString('utf-8'));
+                        });
+                        crs.on('error', e5 => finish(0, 'application/json', null, String(e5.message || e5)));
+                    });
+                    rq.on('timeout', () => { rq.destroy(); finish(504, 'application/json', null, 'timeout'); });
+                    rq.on('error', e6 => finish(0, 'application/json', null, String(e6.message || e6)));
+                    if (reqBody) rq.write(String(reqBody));
+                    rq.end();
+                }).catch(e7 => {
+                    if (!res.headersSent) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ err: String((e7 && e7.message) || e7) })); }
+                });
+                return;
+            }
+            if (pathname === '/api/custom-source/fetch-script' && req.method === 'GET') {
+                const sUrl = urlObj.searchParams.get('url');
+                if (!sUrl || !/^https?:\/\//i.test(sUrl)) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '缺少或非法 URL' }));
+                    return;
+                }
+                void (async () => {
+                    try {
+                        const up = new URL(sUrl);
+                        const lib = up.protocol === 'https:' ? require('https') : require('http');
+                        const chunks = [];
+                        let size = 0;
+                        const creq = lib.get(up, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }, timeout: 12000 }, (cres) => {
+                            if (cres.statusCode >= 300 && cres.statusCode < 400 && cres.headers.location) {
+                                const redir = new URL(cres.headers.location, up).toString();
+                                res.writeHead(302, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ success: false, message: 'redirect:' + redir }));
+                                return;
+                            }
+                            if (cres.statusCode !== 200) {
+                                // lx171b:上游拒绝(如音源站改要卡密)但本地已有同一 URL 的已注册脚本 → 直接回本地副本
+                                try {
+                                    const dataPath2 = process.env.DATA_PATH || require('path').join(process.cwd(), 'data');
+                                    const fs2 = require('fs');
+                                    for (const owner of ['_open']) {
+                                        const metaP = require('path').join(dataPath2, 'users', 'source', owner, 'sources.json');
+                                        if (fs2.existsSync(metaP)) {
+                                            const metas = JSON.parse(fs2.readFileSync(metaP, 'utf-8'));
+                                            const hit = metas.find((m) => m.sourceUrl === sUrl);
+                                            if (hit) {
+                                                const scriptP = require('path').join(dataPath2, 'users', 'source', owner, hit.id);
+                                                if (fs2.existsSync(scriptP)) {
+                                                    res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'X-Local-Fallback': '1' });
+                                                    res.end(fs2.readFileSync(scriptP, 'utf-8'));
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (e4) { /* 本地兜底失败走原错误 */ }
+                                res.writeHead(502, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ success: false, message: `上游 HTTP ${cres.statusCode}`, upstreamStatus: cres.statusCode }));
+                                return;
+                            }
+                            cres.on('data', c => { size += c.length; if (size > 5 * 1024 * 1024) { creq.destroy(); res.writeHead(413); res.end('too large'); } else chunks.push(c); });
+                            cres.on('end', () => {
+                                const body = Buffer.concat(chunks).toString('utf-8');
+                                res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+                                res.end(body);
+                            });
+                        });
+                        creq.on('timeout', () => { creq.destroy(); if (!res.headersSent) { res.writeHead(504); res.end('timeout'); } });
+                        creq.on('error', (e2) => { if (!res.headersSent) { res.writeHead(502); res.end(String(e2.message || e2)); } });
+                    }
+                    catch (e3) {
+                        if (!res.headersSent) { res.writeHead(500); res.end(String(e3.message || e3)); }
+                    }
+                })();
+                return;
+            }
+            // [lx172 老板 0923 03:51] 服务器音源更新机制:检查+应用(管理员);自动任务每日跑(见启动段)
+            // 检查:逐源拉 sourceUrl 对比版本;应用:试加载校验→覆盖文件+元数据+热重载,失败保留旧版
+            if (pathname === '/api/custom-source/check-updates' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                const dataPath0 = process.env.DATA_PATH || node_path_1.default.join(process.cwd(), 'data');
+                const report = [];
+                const owners = ['_open'];
+                const jobs = [];
+                for (const owner of owners) {
+                    const metaP = node_path_1.default.join(dataPath0, 'users', 'source', owner, 'sources.json');
+                    if (!node_fs_1.default.existsSync(metaP)) continue;
+                    let metas = [];
+                    try { metas = JSON.parse(node_fs_1.default.readFileSync(metaP, 'utf-8')); } catch (e) { continue; }
+                    for (const m of metas) {
+                        if (!m.sourceUrl) continue;
+                        jobs.push((async () => {
+                            const item = { id: m.id, name: m.name, current: m.version || '?', latest: null, updatable: false, error: null };
+                            try {
+                                const script = await fetchScriptTextForUpdate(m.sourceUrl);
+                                if (script && script.length > 50) {
+                                    const meta = (0, userApi_1.extractMetadata)(script);
+                                    item.latest = meta.version || '?';
+                                    item.updatable = !!(meta.version && isNewerVer(meta.version, m.version));
+                                    item._script = script.length < 5 * 1024 * 1024 ? script : null; // 供 apply 复用(不回传给前端,下面删)
+                                }
+                                else item.error = '脚本内容异常';
+                            }
+                            catch (e2) {
+                                item.error = String((e2 && e2.message) || e2).slice(0, 120);
+                            }
+                            delete item._script;
+                            report.push(item);
+                        })());
+                    }
+                }
+                void Promise.all(jobs).then(() => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, updates: report }));
+                }).catch(e3 => {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: String(e3 && e3.message || e3) }));
+                });
+                return;
+            }
+            if (pathname === '/api/custom-source/apply-update' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(body => Promise.all([body, (async () => body)()]).then(([b]) => b)).then(body => {
+                    const { id } = JSON.parse(body);
+                    const dataPath0 = process.env.DATA_PATH || node_path_1.default.join(process.cwd(), 'data');
+                    const owner = '_open';
+                    const metaP = node_path_1.default.join(dataPath0, 'users', 'source', owner, 'sources.json');
+                    if (!node_fs_1.default.existsSync(metaP)) throw new Error('无共享源');
+                    const metas = JSON.parse(node_fs_1.default.readFileSync(metaP, 'utf-8'));
+                    const m = metas.find(x => x.id === id);
+                    if (!m) throw new Error('源不存在');
+                    if (!m.sourceUrl) throw new Error('该源没有来源 URL,无法更新');
+                    return fetchScriptTextForUpdate(m.sourceUrl).then(script => {
+                        if (!script || script.length < 50) throw new Error('下载的新脚本内容异常');
+                        const meta = (0, userApi_1.extractMetadata)(script);
+                        if (!isNewerVer(meta.version || '', m.version)) throw new Error(`上游无更新(本地 ${m.version || '?'} ≥ 远端 ${meta.version || '?'})`);
+                        // 试加载校验(不启 enabled)
+                        return new Promise((resolve2, reject2) => {
+                            void (0, userApi_1.loadUserApi)({
+                                id: 'temp_update_check', script, enabled: false,
+                                name: meta.name || m.name, version: meta.version || '1.0.0',
+                                author: meta.author || '', description: meta.description || '',
+                                allowUnsafeVM: false, owner: 'temp'
+                            }).then(r => {
+                                if (!r.success) { reject2(new Error('新脚本试加载失败: ' + (r.error || '未知'))); return; }
+                                // 覆盖脚本文件+元数据
+                                const scriptP = node_path_1.default.join(dataPath0, 'users', 'source', owner, m.id);
+                                node_fs_1.default.writeFileSync(scriptP, script, 'utf-8');
+                                m.version = meta.version || m.version;
+                                if (meta.name) m.name = meta.name;
+                                if (meta.description) m.description = meta.description;
+                                m.size = Buffer.byteLength(script, 'utf-8');
+                                m.uploadTime = new Date().toISOString();
+                                node_fs_1.default.writeFileSync(metaP, JSON.stringify(metas, null, 2), 'utf-8');
+                                resolve2({ version: m.version, name: m.name });
+                            }).catch(reject2);
+                        });
+                    });
+                }).then(r => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, ...r }));
+                }).catch(e4 => {
+                    if (!res.headersSent) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, error: String(e4 && e4.message || e4) }));
+                    }
+                });
+                return;
+            }
+            // [lx173 老板 0923 03:55] 音源有效性检测:逐源搜索+取链端到端(管理员);配合定时自动检测+连续失败自动禁用
+            if (pathname === '/api/custom-source/health-check' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(body => {
+                    const { id } = JSON.parse(body || '{}');
+                    return runSourceHealthCheck(id || null).then(report => {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, report }));
+                    });
+                }).catch(e0 => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: String((e0 && e0.message) || e0) }));
+                });
+                return;
+            }
             if (pathname === '/api/custom-source/import' && req.method === 'POST') {
                 return customSourceHandlers.handleImport(req, res);
             }
@@ -5555,6 +5978,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         'player.enableAuth': global.lx.config['player.enableAuth'] || false,
                         'player.password': global.lx.config['player.password'] || '',
                         'webdav.enable': global.lx.config['webdav.enable'] ?? false,
+                        'source.autoUpdate': global.lx.config['source.autoUpdate'] !== false,
                         'webdav.url': global.lx.config['webdav.url'] || '',
                         'webdav.username': global.lx.config['webdav.username'] || '',
                         'webdav.password': global.lx.config['webdav.password'] || '',
@@ -5648,6 +6072,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                                 global.lx.config['player.enableAuth'] = newConfig['player.enableAuth'];
                             if (newConfig['player.password'] !== undefined)
                                 global.lx.config['player.password'] = newConfig['player.password'];
+                            if (newConfig['source.autoUpdate'] !== undefined)
+                                global.lx.config['source.autoUpdate'] = !!newConfig['source.autoUpdate'];
                             // WebDAV 配置
                             if (newConfig['webdav.enable'] !== undefined)
                                 global.lx.config['webdav.enable'] = newConfig['webdav.enable'];
@@ -6621,6 +7047,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
     });
     host = `http://${ip.includes(':') ? `[${ip}]` : ip}:${port}`;
     httpServer.listen(port, ip);
+    scheduleSourceAutoUpdate(); // [lx172] 每日共享源自动更新
+    scheduleSourceHealthCheck(); // [lx173] 每 6h 音源有效性检测+连续失败自动禁用
 });
 // const handleStopServer = async() => new Promise<void>((resolve, reject) => {
 //   if (!wss) return

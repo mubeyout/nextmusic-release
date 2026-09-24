@@ -3638,7 +3638,15 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     return;
                 }
                 const userCfg = (0, user_1.getUserConfig)(verified);
-                const customDir = customMusicManager.getCustomMusicDir(verified);
+                // v1.2 spec⑪A:上传目标共享库(?lib=)——owner 切 shared_<id>(权限校验同聚合层)
+                const uploadLib = urlObj.searchParams.get('lib');
+                let upOwner = verified;
+                if (uploadLib) {
+                    const r = sharedLib.resolveAccess(uploadLib, verified);
+                    if (!r.ok) { res.writeHead(r.code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: r.reason })); return; }
+                    upOwner = r.ownerKey;
+                }
+                const customDir = customMusicManager.getCustomMusicDir(upOwner);
                 if (!customDir) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: false, message: '未开启或未配置自定义音乐目录(后台·用户管理可开)' }));
@@ -3697,11 +3705,11 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     let byDirSplit = null; // v1.1 完成卡拆分:N 首 ID3 完整 / M 首按文件夹分组
                     if (uploaded.length) {
                         try {
-                            await customMusicManager.syncCustomIndex(verified);
-                            libraryAgg.invalidate(verified);
-                            stats = libraryAgg.stats(verified);
+                            await customMusicManager.syncCustomIndex(upOwner);
+                            libraryAgg.invalidate(upOwner);
+                            stats = libraryAgg.stats(upOwner);
                             // 新上传歌曲的分组归属:uploaded 名单按 filename 匹配索引,数 byDir 专辑
-                            const idx = customMusicManager.customIndexManager.getAll(verified);
+                            const idx = customMusicManager.customIndexManager.getAll(upOwner);
                             const byName = new Set(uploaded.map(u => u.name));
                             let id3Full = 0, byDir = 0;
                             for (const it of idx) {

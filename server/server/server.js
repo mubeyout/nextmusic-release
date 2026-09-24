@@ -59,6 +59,7 @@ const userApi_1 = require("./userApi");
 const customSourceHandlers = __importStar(require("./customSourceHandlers"));
 const fileCache = __importStar(require("./fileCache"));
 const customMusicManager = __importStar(require("./customMusicManager"));
+const libraryAgg = __importStar(require("./libraryAgg")); // 我的曲库聚合(0924 一等公民 P1)
 const serverDownloadQueue = __importStar(require("./serverDownloadQueue"));
 const remasterQueue = __importStar(require("./remasterQueue"));
 const downloadQuality_1 = require("./downloadQuality");
@@ -3629,6 +3630,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     return;
                 }
                 void customMusicManager.syncCustomIndex(verified).then(() => {
+                    libraryAgg.invalidate(verified); // 曲库聚合缓存失效,扫描后立即可见新歌
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: true, message: 'Sync completed' }));
                 }).catch(err => {
@@ -3667,6 +3669,61 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     customMusicManager.serveCustomFile(req, res, rawFilename, verified);
                     return;
                 }
+            }
+            // F. 「我的曲库」聚合层(老板 0924 一等公民 P1):基于 custom_index 的艺/专/最近/随机——token 鉴权与 custom 系一致
+            if (pathname.startsWith('/api/music/library/')) {
+                const verified = (0, exports.verifyUserAuth)(req);
+                if (!verified) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                    return;
+                }
+                const sub = pathname.slice('/api/music/library/'.length);
+                const ok = (obj) => {
+                    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store, must-revalidate' });
+                    res.end(JSON.stringify({ success: true, ...obj }));
+                };
+                const num = (k, d) => {
+                    const v = parseInt(urlObj.searchParams.get(k) || '', 10);
+                    return Number.isFinite(v) && v >= 0 ? v : d;
+                };
+                try {
+                    if (sub === 'artists' && req.method === 'GET') {
+                        ok({ data: libraryAgg.listArtists(verified, { offset: num('offset', 0), limit: num('limit', 0) }) });
+                        return;
+                    }
+                    if (sub === 'artist' && req.method === 'GET') {
+                        const r = libraryAgg.getArtist(verified, urlObj.searchParams.get('id') || '');
+                        if (!r) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Artist not found' })); return; }
+                        ok({ data: r });
+                        return;
+                    }
+                    if (sub === 'albums' && req.method === 'GET') {
+                        ok({ data: libraryAgg.listAlbums(verified, { type: urlObj.searchParams.get('type') || 'newest', size: num('size', 60), offset: num('offset', 0) }) });
+                        return;
+                    }
+                    if (sub === 'album' && req.method === 'GET') {
+                        const r = libraryAgg.getAlbum(verified, urlObj.searchParams.get('id') || '');
+                        if (!r) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Album not found' })); return; }
+                        ok({ data: r });
+                        return;
+                    }
+                    if (sub === 'songs' && req.method === 'GET') {
+                        ok({ data: libraryAgg.listSongs(verified, { type: urlObj.searchParams.get('type') || 'recent', size: num('size', 30) }) });
+                        return;
+                    }
+                    if (sub === 'stats' && req.method === 'GET') {
+                        ok({ data: libraryAgg.stats(verified) });
+                        return;
+                    }
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Unknown library endpoint' }));
+                }
+                catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: err.message }));
+                }
+                return;
             }
             // D. 获取自定义目录封面
             if (pathname === '/api/music/custom/cover' && req.method === 'GET') {
@@ -3728,6 +3785,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         for (const item of rawItems) {
                             const filename = typeof item === 'string' ? item : item?.filename;
                             if (filename && customMusicManager.removeCustomFile(filename, verified)) {
+                                libraryAgg.invalidate(verified); // 删除后聚合缓存同步失效
                                 deletedCount++;
                             }
                         }

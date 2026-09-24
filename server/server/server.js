@@ -3621,7 +3621,86 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 });
                 return;
             }
-            // B. 强制重新同步自定义目录
+            // C2. 上传到我的曲库(P1b 0924 老板追加:客户端→服务器导入链路)——token 鉴权,multipart 批量,
+            // 落盘用户 customMusicDir 根(音频扩展名白名单+basename 防穿越,重名跳过不覆盖),完成后自动增量扫描+聚合失效,传完即上墙
+            if (pathname === '/api/music/custom/upload' && req.method === 'POST') {
+                const verified = (0, exports.verifyUserAuth)(req);
+                if (!verified) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                    return;
+                }
+                const userCfg = (0, user_1.getUserConfig)(verified);
+                const customDir = customMusicManager.getCustomMusicDir(verified);
+                if (!customDir) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '未开启或未配置自定义音乐目录(后台·用户管理可开)' }));
+                    return;
+                }
+                if (!userCfg || userCfg.allowWriteCustomMusicDir !== true) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '后台未开启你的曲库写入权限(后台→用户管理→允许写入自定义目录)' }));
+                    return;
+                }
+                const contentType = req.headers['content-type'] || '';
+                if (!contentType.includes('multipart/form-data')) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Expected multipart/form-data' }));
+                    return;
+                }
+                const form = (0, formidable_1.default)({ multiples: true, uploadDir: node_os_1.default.tmpdir(), maxFileSize: 500 * 1024 * 1024 });
+                form.parse(req, async (err, _fields, files) => {
+                    if (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: 'Upload error: ' + err.message }));
+                        return;
+                    }
+                    const rawList = files.files || files['files[]'] || Object.values(files)[0];
+                    const list = Array.isArray(rawList) ? rawList.filter(Boolean) : (rawList ? [rawList] : []);
+                    const AUDIO_EXT = ['.mp3', '.flac', '.m4a', '.ogg', '.wav', '.ape'];
+                    const uploaded = [];
+                    const skipped = [];
+                    const failed = [];
+                    for (const f of list) {
+                        // basename 化防穿越;原名可能带设备相对路径,取末段
+                        const safeName = node_path_1.default.basename(String(f.originalFilename || f.newFilename || ''));
+                        const ext = node_path_1.default.extname(safeName).toLowerCase();
+                        const dest = node_path_1.default.join(customDir, safeName);
+                        try {
+                            if (!safeName || !AUDIO_EXT.includes(ext)) {
+                                failed.push({ name: safeName || '(unnamed)', reason: '非音频文件(' + (ext || '无扩展名') + ')' });
+                            }
+                            else if (node_fs_1.default.existsSync(dest)) {
+                                skipped.push(safeName);
+                            }
+                            else {
+                                await node_fs_1.default.promises.copyFile(f.filepath, dest);
+                                uploaded.push({ name: safeName, size: f.size || 0 });
+                            }
+                        }
+                        catch (e2) {
+                            failed.push({ name: safeName, reason: String(e2 && e2.message || e2).slice(0, 80) });
+                        }
+                        finally {
+                            try { await node_fs_1.default.promises.unlink(f.filepath); } catch (e3) { }
+                        }
+                    }
+                    // 有新文件则增量扫描+聚合失效:传完即出现在专辑墙
+                    let stats = null;
+                    if (uploaded.length) {
+                        try {
+                            await customMusicManager.syncCustomIndex(verified);
+                            libraryAgg.invalidate(verified);
+                            stats = libraryAgg.stats(verified);
+                        }
+                        catch (e4) { /* 扫描失败不影响上传结果,客户端可手动刷新 */ }
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, uploaded, skipped, failed, stats }));
+                });
+                return;
+            }
+            // C. 强制重新同步自定义目录
             if (pathname === '/api/music/custom/sync' && req.method === 'POST') {
                 const verified = (0, exports.verifyUserAuth)(req);
                 if (!verified) {

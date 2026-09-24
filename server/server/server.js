@@ -3935,6 +3935,20 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     res.end(JSON.stringify({ success: true }));
                     return;
                 }
+                // POST /:id/approve 审批申请(用户名入白名单,清 request)——admin 节「消息中心」动作
+                const mA = sub.match(/^\/([a-z0-9_-]+)\/approve$/i);
+                if (req.method === 'POST' && mA) {
+                    void readBody(req).then(body => {
+                        try {
+                            const { user } = JSON.parse(body);
+                            const okA = sharedLib.approve(mA[1], String(user || ''));
+                            res.writeHead(okA ? 200 : 404, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: okA }));
+                        }
+                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false })); }
+                    });
+                    return;
+                }
                 // POST /:id/sync 扫描(管理员手动;扫描后回填 songCountHint)
                 const m = sub.match(/^\/([a-z0-9_-]+)\/sync$/i);
                 if (req.method === 'POST' && m) {
@@ -3985,8 +3999,9 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         owner = r.ownerKey;
                 }
                 if (libDenied) {
+                    // v1.2 spec⑪C:403 带 lock 四字段 {name, reason, owner, songCount}
                     res.writeHead(libDenied.code, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: libDenied.reason, lock: libDenied }));
+                    res.end(JSON.stringify({ success: false, message: libDenied.reason, lock: libDenied.lock || { name: libDenied.name || libParam, reason: libDenied.reason, owner: '管理员', songCount: libDenied.songCountHint || 0 } }));
                     return;
                 }
                 const sub = pathname.slice('/api/music/library/'.length);
@@ -3999,6 +4014,26 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     return Number.isFinite(v) && v >= 0 ? v : d;
                 };
                 try {
+                    if (sub === 'home' && req.method === 'GET') {
+                        // 质感#3(0924):进屏四路数据一揽子端点——治 req() 全局串行队列下的 524-677ms 空窗(四次往返变一次)
+                        const al = libraryAgg.listAlbums(owner, { type: 'newest', size: 120, offset: 0 });
+                        const ar = libraryAgg.listArtists(owner, { offset: 0, limit: 0 });
+                        const rc = libraryAgg.listSongs(owner, { type: 'recent', size: 60 });
+                        ok({ data: { stats: libraryAgg.stats(owner), albums: al.albums, artists: ar.artists, recent: rc.songs } });
+                        return;
+                    }
+                    if (sub === 'shared/request' && req.method === 'POST') {
+                        void readBody(req).then(body => {
+                            try {
+                                const { id } = JSON.parse(body);
+                                const r = sharedLib.requestAccess(String(id || ''), verified);
+                                res.writeHead(r.ok ? 200 : (r.code || 400), { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ success: r.ok, message: r.ok ? (r.dup ? '已申请过,等待管理员审批' : '已提交申请,管理员将在后台审批') : r.reason }));
+                            }
+                            catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false })); }
+                        });
+                        return;
+                    }
                     if (sub === 'shared/list' && req.method === 'GET') {
                         ok({ data: { libs: sharedLib.listForUser(verified) } });
                         return;

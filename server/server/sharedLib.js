@@ -20,7 +20,8 @@ function saveLibs(libs) {
         console.error('[sharedLib] saveConfig unavailable');
 }
 
-/** 权限解析:返回 {ok, ownerKey, lib} 或 {ok:false, code:404|403, reason} */
+/** 权限解析:返回 {ok, ownerKey, lib} 或 {ok:false, code:404|403, reason, lock}
+ * v1.2 spec⑪C:锁卡四字段 {name, reason, owner, songCount} 直渲染——lock 补 owner+精确 songCount */
 function resolveAccess(libId, username) {
     const lib = readLibs().find(l => l.id === libId && l.enabled !== false);
     if (!lib) return { ok: false, code: 404, reason: '共享库不存在或未启用' };
@@ -28,9 +29,35 @@ function resolveAccess(libId, username) {
     if (lib.access === 'allow') {
         const list = Array.isArray(lib.allowList) ? lib.allowList : [];
         if (username && list.includes(username)) return { ok: true, ownerKey: 'shared_' + lib.id, lib };
-        return { ok: false, code: 403, reason: '需要管理员授权后可见', lib };
+        return {
+            ok: false, code: 403, reason: `仅限授权成员`, lib,
+            lock: { name: lib.name || lib.id, reason: '仅限授权成员', owner: lib.owner || '管理员', songCount: lib.songCountHint || 0 },
+        };
     }
     return { ok: false, code: 403, reason: '未知的访问模式' };
+}
+
+/** v1.2 spec⑪C:申请访问——写入 lib.requests(admin 消息中心=admin 节列表带回) */
+function requestAccess(libId, username) {
+    const libs = readLibs();
+    const lib = libs.find(l => l.id === libId && l.enabled !== false);
+    if (!lib) return { ok: false, code: 404, reason: '共享库不存在' };
+    if (!Array.isArray(lib.requests)) lib.requests = [];
+    if (lib.requests.some(r => r.user === username)) return { ok: true, dup: true };
+    lib.requests.push({ user: username, at: Date.now() });
+    saveLibs(libs);
+    return { ok: true };
+}
+/** admin 审批:一键加白名单(清掉该 request) */
+function approve(libId, username) {
+    const libs = readLibs();
+    const lib = libs.find(l => l.id === libId);
+    if (!lib) return false;
+    if (!Array.isArray(lib.allowList)) lib.allowList = [];
+    if (!lib.allowList.includes(username)) lib.allowList.push(username);
+    lib.requests = (lib.requests || []).filter(r => r.user !== username);
+    saveLibs(libs);
+    return true;
 }
 
 /** 用户可见清单(锁态也要展示——锁卡是 spec ⑨ 的态) */
@@ -58,4 +85,4 @@ function validateLib(body) {
     return null;
 }
 
-module.exports = { readLibs, saveLibs, resolveAccess, listForUser, validateLib, DEFAULTS };
+module.exports = { readLibs, saveLibs, resolveAccess, listForUser, validateLib, requestAccess, approve, DEFAULTS };

@@ -47,7 +47,7 @@
 | 🎚️ 音效 | 10 段 EQ · 流派预设 · 混响/音调/空间音效 · ViPER-lite 低音/细节/响度全链 |
 | 🔄 同步与备份 | 多端歌单/收藏/音效预设云同步（免费）· WebDAV 云备份（Pro）· 断点续播/进度漫游（Pro·建设中） |
 | 🖥️ 自托管服务器 | Web 管理台 · Web 播放器 · 多用户 · 服务器缓存下载 · 服务器端音源管理 |
-| 📚 媒体库聚合 | **12 种服务直连**：Emby / Jellyfin / Plex / Navidrome / Subsonic / 道理鱼 / 群晖 / 飞牛 / mStream / Songloft / Audiobookshelf / WebDAV，一处浏览 · 播放统计回写 |
+| 📚 媒体库聚合 | **13 种服务直连**：Emby / Jellyfin / Plex / Navidrome / Subsonic / 道理鱼 / 听风音乐 / 群晖 / 飞牛 / mStream / Songloft / Audiobookshelf / WebDAV，一处浏览 · 播放统计回写 |
 | 🧩 音源生态 | LX 协议 + MusicFree 插件 · 服务器共享源多级容灾 · 有效性检测/自动禁用/自动更新 |
 | 🧩 更多 | 跨平台歌单导入 · 下载管理(并发/重试) · 主题外观 · 音频可视化 · 播客聚合 |
 

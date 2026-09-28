@@ -32,6 +32,28 @@
 </tr>
 </table>
 
+## 💰 一次买断，全平台通用
+
+<table>
+<tr>
+<td width="600"><img src="assets/screens/pricing-hero.png" alt="NextMusic 定价" width="600"><br><sub>四档定价 · 开源生态免费 × 品牌 NAS 生态随 Pro 解锁</sub></td>
+</tr>
+</table>
+
+| 版本 | 价格 | 你得到什么 |
+|------|------|-----------|
+| **免费版** | ¥0 | 本地全功能 · 五端使用 · 5 大平台聚合 · **8 种开源媒体库直连**（Jellyfin / Navidrome / Subsonic / WebDAV / 听风 / mStream / Songloft / Audiobookshelf）|
+| **Pro** | **¥19.9 / $2.99 买断终身** | 全部 Pro 功能（10 段 EQ · 逐字歌词 · WebDAV 云备份等）＋ **品牌 NAS 生态直连**（Emby / Plex / 群晖 / 飞牛 / 道理鱼）＋ 7 天免费试用 |
+| **家庭版** | **¥88 买断终身**（≤6 人） | 全员 Pro ＋ 家庭共享曲库——一人整理，全家直接听；已购 Pro 补差 ¥68 升级 |
+| **商业版** | **¥99/≤15 席 · ¥299/≤50 席 · ¥699/51-200 席 · 年付** | 组织席位管理 · API/Webhook · 商用授权 · 优先支持；容量在您自己的服务器上自定义 |
+
+> 🧋 「¥19.9，一杯奶茶的价格，一辈子的音乐系统。」
+> 🖥️ 一套系统，跑在你所有的屏幕上：手机 Android · 桌面 Win/macOS/Linux · TV·车机（HD 车机模式）· Web PWA（iPhone 浏览器直用，无需 App Store）——**不按平台收费，不加收设备费**。
+> 🔀 屏幕之间，无缝切换——播放中换耳机/音箱不断声；DLNA / Chromecast（国内少见）/ AirPlay 一键投屏。
+> 📦 部署：Docker 一条命令（ghcr.io）· 安装包直下。
+
+🛒 **购买**：[面包多 · 请作者喝杯奶茶 🧋](https://mbd.pub/o/nextmusic/work)
+
 ## 🧰 功能一览
 
 | 域 | 能力 |

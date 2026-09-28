@@ -1,6 +1,3 @@
-<p align="center">
-  <img src="assets/banner.svg" width="860" alt="NextMusic — 自己的音乐系统">
-</p>
 
 <h3 align="center">本地优先 · 四端一套 · 自托管同步</h3>
 
@@ -32,10 +29,6 @@
 <tr>
 <td width="474"><img src="assets/screens/hd-media.png" width="474" alt="HD 媒体库封面网格"><br><sub><b>接入你的曲库</b> · HD 媒体库</sub></td>
 <td width="474"><img src="assets/screens/tv-fx.png" width="474" alt="10 段 EQ 音效"><br><sub><b>看得见的专业</b> · 10 段 EQ 音效</sub></td>
-</tr>
-<tr>
-<td width="210"><img src="assets/screens/phone-home.png" width="200" alt="手机首页"><br><sub><b>你的音乐主页</b> · 手机</sub></td>
-<td><img src="assets/screens/phone-explore.png" width="200" alt="手机探索页"><br><sub><b>探索好音乐</b> · 手机</sub></td>
 </tr>
 </table>
 

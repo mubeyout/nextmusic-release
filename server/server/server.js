@@ -644,7 +644,10 @@ const saveUsers = () => {
     // ②同步 saveConfig() 落盘 config.js——双源(config.js/users.json)永远一致,升级/重启不丢用户配置
     const usersJsonPath = node_path_1.default.join(global.lx.dataPath, 'users.json');
     try {
-        node_fs_1.default.writeFileSync(usersJsonPath, JSON.stringify(global.lx.config.users.map(u => ({
+        // [KAI 20261008 家族案根修①] 原子写：tmp+rename——裸 writeFileSync 的截断窗口被并发加载读到半文件
+        // →JSON.parse 失败→内存回退 config.js 陈旧 users=登录失败/授权消失全家桶（详见 forensics-1008）
+        const tmpPath = usersJsonPath + '.tmp';
+        const payload = JSON.stringify(global.lx.config.users.map(u => ({
             name: u.name,
             password: u.password,
             maxSnapshotNum: u.maxSnapshotNum,
@@ -653,7 +656,9 @@ const saveUsers = () => {
             customMusicDir: u.customMusicDir,
             allowOperateCustomMusicDir: u.allowOperateCustomMusicDir,
             allowWriteCustomMusicDir: u.allowWriteCustomMusicDir,
-        })), null, 2));
+        })), null, 2);
+        node_fs_1.default.writeFileSync(tmpPath, payload);
+        node_fs_1.default.renameSync(tmpPath, usersJsonPath); // 原子替换:要么旧文件要么新文件,永无半写态
         if (typeof global.lx.saveConfig === 'function')
             global.lx.saveConfig(); // users 也在 config.js 里——同步落盘,双源一致
         return true;
@@ -664,6 +669,8 @@ const saveUsers = () => {
     }
 };
 /** [新增] 服务器内部热重载数据 */
+// [KAI 20261008 根修②] 模块级 lastGoodUsers:最近一次成功加载的用户表——users.json 不可读时回填兑底,绝不退回 config.js 陈旧表
+let lastGoodUsers = null;
 const reloadServerData = async () => {
     log4js_1.startupLog.info('Hot-reloading server data (users and config)...');
     // 1. 重新加载 config.js (必须先加载基础配置)
@@ -703,6 +710,9 @@ const reloadServerData = async () => {
             const usersRaw = node_fs_1.default.readFileSync(usersJsonPath, 'utf-8');
             const users = JSON.parse(usersRaw);
             if (Array.isArray(users)) {
+                // [KAI 20261008 家族案根修②] never-regress：成功加载记入 lastGoodUsers；
+                // 失败/非数组时用 lastGoodUsers 回填而非沉默回退 config.js 陈旧 users（登录失败/授权消失的根源）
+                lastGoodUsers = users;
                 global.lx.config.users = users.map(u => ({
                     ...u,
                     dataPath: node_path_1.default.join(global.lx.userPath, (0, user_1.getUserDirname)(u.name))
@@ -718,6 +728,13 @@ const reloadServerData = async () => {
         }
         catch (err) {
             log4js_1.startupLog.error('Failed to reload users.json:', err.message);
+            // [KAI 20261008 根修②] 加载失败：lastGoodUsers 回填，绝不沉默退回 config.js 陈旧表
+            if (lastGoodUsers && Array.isArray(lastGoodUsers) && lastGoodUsers.length) {
+                global.lx.config.users = lastGoodUsers.map(u => ({ ...u, dataPath: node_path_1.default.join(global.lx.userPath, (0, user_1.getUserDirname)(u.name)) }));
+                log4js_1.startupLog.warn(`users.json unreadable — restored ${lastGoodUsers.length} users from lastGoodUsers (regression blocked)`);
+            } else {
+                log4js_1.startupLog.error('users.json unreadable AND no lastGoodUsers — keeping current in-memory users');
+            }
         }
     }
     // 3. 重新初始化 User APIs (解决脚本源实时生效问题)

@@ -53,7 +53,7 @@
 > 🔒 **价格只涨不降** —— 已购权益永久有效；未来如调价，老用户不受影响、不补差。
 > 📦 部署：Docker 一条命令（ghcr.io）· 安装包直下。
 
-🛒 **购买**：[爱发电 ☕](https://ifdian.net/a/nextmusic)
+🛒 **购买**：[官方店铺](https://nextmusic.mubey.top:8300)
 
 ## 🧰 功能一览
 
@@ -115,7 +115,7 @@
 - **7 天全功能免费试用**：App 内自动开启，无需注册；到期设置全保留
 - **一码 5 台**：一枚激活码可绑定 5 台设备（手机/平板/TV/电脑都算上，够全家用）
 - **只涨不降**：已解锁的 Pro 能力永久有效，不会回收
-- 🛒 **购买**：[爱发电 ☕](https://ifdian.net/a/nextmusic) —— Pro ¥19.9 / 家庭版 ¥88 终身买断，付款后自动发码
+- 🛒 **购买**：[官方店铺](https://nextmusic.mubey.top:8300) —— Pro ¥19.9 / 家庭版 ¥88 终身买断，付款后自动发码
 
 ## ❓ 常见问题
 
@@ -164,4 +164,4 @@ NextMusic 是独立开发的音乐产品：客户端为独立代码库（React N
 
 ---
 
-NextMusic · 免费无广告，Pro ¥19.9 终身 · [☕ 爱发电](https://ifdian.net/a/nextmusic)
+NextMusic · 免费无广告，Pro ¥19.9 终身 · [官方店铺](https://nextmusic.mubey.top:8300)

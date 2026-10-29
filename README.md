@@ -88,7 +88,12 @@
 
 **部署载体任选**：
 
-- 🐳 **Docker**（NAS / 服务器 / 家庭主机）：提供 Dockerfile，`docker build` 一条命令起服务
+- 🐳 **Docker**（NAS / 服务器 / 家庭主机）三种方式任选：
+  1. **镜像包加载**（推荐，含最新 Web 播放器/管理台）：`docker load -i nextmusic-server-v1.4.1-libv2.tar.gz` → `docker run -d --name NextMusic -p 9527:9527 -v /your/data:/app/data --restart unless-stopped nextmusic-server:latest`（tar 包见群晖 `/APP` 目录或 Release 附件）
+  2. **Dockerfile 自建**：`docker build -t nextmusic-server .`
+  3. **GHCR 拉取**：`ghcr.io/mubeyout/nextmusic-server`（注意：该源受网络策略影响可能滞后，优先用方式 1）
+
+> v1.4.1（libv2 基线）包含：车机适配（安全区让位/IME/语音直达）、全端去弥散投影、封面体系恢复、网格自适应排满、播放页歌词新样式等。桌面端（mac x64/arm64 · Linux AppImage/deb · Win portable）与 Android（phone/HD）安装包见 `/APP` 目录或 Release 附件。
 - 💻 **桌面版内置服务器**（🚧 即将支持）：客户端 + 服务器 all-in-one，零 Docker 零 NAS，一台电脑 = 全家音乐中枢
 
 > 🚧 **即将支持**：桌面即服务器、跨设备断点续播、逐字歌词、智能离线、主题皮肤、车机深度适配（歌单一键缓存）。

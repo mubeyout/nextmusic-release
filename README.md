@@ -88,12 +88,12 @@
 
 **部署载体任选**：
 
-- 🐳 **Docker**（NAS / 服务器 / 家庭主机）三种方式任选：
-  1. **镜像包加载**（推荐，含最新 Web 播放器/管理台）：`docker load -i nextmusic-server-v1.4.1-libv2.tar.gz` → `docker run -d --name NextMusic -p 9527:9527 -v /your/data:/app/data --restart unless-stopped nextmusic-server:latest`（tar 包见群晖 `/APP` 目录或 Release 附件）
-  2. **Dockerfile 自建**：`docker build -t nextmusic-server .`
-  3. **GHCR 拉取**：`ghcr.io/mubeyout/nextmusic-server`（注意：该源受网络策略影响可能滞后，优先用方式 1）
+- 🐳 **Docker**（NAS / 服务器 / 家庭主机）三种方式任选，**完整说明见 [DEPLOY-V1.md](./DEPLOY-V1.md)**：
+  1. **镜像包加载**（推荐，离线可用）：`docker load -i nextmusic-server-v1-docker-image.tar.gz` → `docker run -d --name NextMusic -p 9527:9527 -v /your/data:/server/data --restart unless-stopped nextmusic-server:latest`，再用 `NextMusic-HDWeb-v1-dist.tgz` 覆盖前端即得最新 HD 界面 + `/admin` 后台管理（两包都在 [Release v1](../../releases/tag/v1) 附件）
+  2. **Dockerfile 自建**：`git clone 本仓 && docker build -t nextmusic-server:v1 .`
+  3. **GHCR 拉取**：`ghcr.io/mubeyout/nextmusic-server`（受网络策略影响可能滞后，优先用方式 1）
 
-> v1.4.1（libv2 基线）包含：车机适配（安全区让位/IME/语音直达）、全端去弥散投影、封面体系恢复、网格自适应排满、播放页歌词新样式等。桌面端（mac x64/arm64 · Linux AppImage/deb · Win portable）与 Android（phone/HD）安装包见 `/APP` 目录或 Release 附件。
+> **V1 冻结版（2026-11-20）** 包含：真实化前后台（登录/音源管理/播放根治/播客 8 频道）、HD 新旧双 UI、车机适配、图标光学归一等。安卓 phone + HD（vc183）三 ABI、桌面 Win/macOS 双架构/Linux 双格式、Docker 镜像与 Web dist 全部在 [Release v1](../../releases/tag/v1)。**V1 不再改动；后续演进看 V2。**
 - 💻 **桌面版内置服务器**（🚧 即将支持）：客户端 + 服务器 all-in-one，零 Docker 零 NAS，一台电脑 = 全家音乐中枢
 
 > 🚧 **即将支持**：桌面即服务器、跨设备断点续播、逐字歌词、智能离线、主题皮肤、车机深度适配（歌单一键缓存）。
@@ -154,14 +154,16 @@ NextMusic 是独立开发的音乐产品：客户端为独立代码库（React N
 
 ## 📥 下载
 
+**V1 冻结版全平台成品在 [Release v1](../../releases/tag/v1)**（13 个资产）：
+
 | 平台 | 包 |
 |------|-----|
-| Android 手机 / 平板 | universal · arm64-v8a · armeabi-v7a · x86_64 APK |
-| Android TV / 盒子 / 车机（HD 版） | 同上 |
-| Windows | exe 安装包 |
+| Android 手机 / 平板（Phone） | arm64-v8a · armeabi-v7a · universal |
+| Android TV / 盒子 / 车机（HD 版·V1 稳定 UI） | vc183 三 ABI |
+| Windows | x64 portable（解压即用） |
 | Linux 桌面 | deb · AppImage |
-| macOS（Apple Silicon / Intel） | dmg（未签名，安装后执行 `xattr -cr /Applications/NextMusic.app` 解除隔离） |
-| 服务器（后台） | 🐳 Docker（Dockerfile 自构建；服务端部署文档随后上线） |
+| macOS（Apple Silicon / Intel） | arm64 · x64 双 zip（未签名，安装后执行 `xattr -cr /Applications/NextMusic.app` 解除隔离） |
+| 服务器（后台） | 🐳 Docker 镜像 tar.gz（load 即起）+ Web 前台/后台 dist（覆盖即升级）——部署见 [DEPLOY-V1.md](./DEPLOY-V1.md) |
 
 👉 客户端前往 [**Releases**](../../releases) 获取最新版本。App 内置更新通道，保持默认即可自动收到新版本。
 

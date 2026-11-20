@@ -5,18 +5,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="referrer" content="no-referrer">
-    <title>NextMusic Server · 控制台</title>
+    <title>NextMusic · 管理控制台</title>
     <script>
         (function () {
             var pathname = window.location.pathname;
-            var baseHref = pathname.endsWith('/') ? pathname : pathname + '/';
+            var baseHref = /\.html$/.test(pathname) ? pathname.slice(0, pathname.lastIndexOf('/') + 1) : pathname.endsWith('/') ? pathname : pathname + '/';
             var baseTag = document.createElement('base');
             baseTag.href = baseHref;
             document.head.prepend(baseTag);
         })();
     </script>
     <script src="/js/config.js"></script>
+    <link rel="stylesheet" href="vendor/fonts/inter.css">
     <link rel="stylesheet" href="style.css">
+    <script>try{document.documentElement.dataset.theme=localStorage.getItem('nextmusic-admin-theme')||'light'}catch(e){document.documentElement.dataset.theme='light'}</script>
+    <link rel="stylesheet" href="console.css">
     <link rel="icon" href="icon.svg" type="image/svg+xml">
     <link rel="manifest" href="manifest.json">
     <script>
@@ -82,14 +85,14 @@
                     </g>
                 </svg>
             </div>
-            <h1>NextMusic Server</h1>
-            <div class="sub">欢迎回家 · 你的音乐，你的服务器</div>
+            <div class="login-eyebrow">NEXTMUSIC CONSOLE</div><h1>管理你的音乐世界</h1>
+            <div class="sub">连接、同步与备份，一切尽在掌握。</div>
             <div class="field">
                 <label for="access-password">访问密码</label>
-                <input type="password" id="access-password" class="inp" placeholder="请输入访问密码" autocomplete="off" autofocus>
+                <input type="password" id="access-password" class="inp" placeholder="请输入访问密码" autocomplete="current-password" autofocus>
             </div>
-            <button id="login-btn" class="btn-p">进入 Server</button>
-            <p id="login-error" class="login-error"></p>
+            <button id="login-btn" class="btn-p">进入管理控制台</button>
+            <p id="login-error" class="login-error" role="alert"></p><div class="login-foot">NextMusic · 你的音乐，你的服务器</div>
         </div>
     </div>
 
@@ -108,68 +111,50 @@
                 </span>
                 <b>NextMusic</b>
             </div>
-            <a class="nav-item on" data-view="dashboard"><svg class="ic2"><use href="#i-dash"/></svg>仪表盘</a>
-            <a class="nav-item" data-view="users"><svg class="ic2"><use href="#i-user"/></svg>用户</a>
-            <a class="nav-item" data-view="data"><svg class="ic2"><use href="#i-music"/></svg>数据</a>
-            <a class="nav-item" data-view="config"><svg class="ic2"><use href="#i-gear"/></svg>设置</a>
-            <a class="nav-item" data-view="webdav"><svg class="ic2"><use href="#i-cloud"/></svg>WebDAV</a>
-            <a class="nav-item" data-view="sources"><svg class="ic2"><use href="#i-wave"/></svg>音源</a>
-            <a class="nav-item" data-view="snapshots"><svg class="ic2"><use href="#i-snap"/></svg>快照</a>
-            <a class="nav-item" data-view="logs"><svg class="ic2"><use href="#i-log"/></svg>日志</a>
-            <div class="side-b">
-                <a class="nav-item" data-view="files"><svg class="ic2"><use href="#i-folder"/></svg>文件</a>
-                <a class="nav-item" data-view="music" id="nav-player-link"><svg class="ic2"><use href="#i-play"/></svg>播放器</a>
-                <a class="nav-item" data-view="about"><svg class="ic2"><use href="#i-info"/></svg>关于</a>
-                <div class="side-logout">
-                    <a class="nav-item" id="logout-btn"><svg class="ic2"><use href="#i-power"/></svg>退出登录</a>
-                </div>
-            </div>
-            <div class="side-ver" id="sidebar-version">NextMusic Server</div>
+<div class="console-edition">管理控制台 <span>SERVER</span></div><nav aria-label="主导航"><div class="nav-label">工作台</div><a href="#dashboard" class="nav-item on" data-view="dashboard"><svg class="ic2"><use href="#i-dash"/></svg><span>服务总览</span></a><div class="nav-label">内容与用户</div><a href="#users" class="nav-item" data-view="users"><svg class="ic2"><use href="#i-user"/></svg><span>用户管理</span></a><a href="#data" class="nav-item" data-view="data"><svg class="ic2"><use href="#i-music"/></svg><span>音乐数据</span></a><a href="#sources" class="nav-item" data-view="sources"><svg class="ic2"><use href="#i-wave"/></svg><span>音源管理</span></a><div class="nav-label">同步与存储</div><a href="#webdav" class="nav-item" data-view="webdav"><svg class="ic2"><use href="#i-cloud"/></svg><span>云端同步</span></a><a href="#snapshots" class="nav-item" data-view="snapshots"><svg class="ic2"><use href="#i-snap"/></svg><span>快照备份</span></a><a href="#files" class="nav-item" data-view="files"><svg class="ic2"><use href="#i-folder"/></svg><span>文件管理</span></a><div class="nav-label">系统</div><a href="#logs" class="nav-item" data-view="logs"><svg class="ic2"><use href="#i-log"/></svg><span>运行日志</span></a><a href="#config" class="nav-item" data-view="config"><svg class="ic2"><use href="#i-gear"/></svg><span>系统设置</span></a></nav><div class="side-b"><a class="nav-item" data-view="music" id="nav-player-link" target="_blank" rel="noopener"><svg class="ic2"><use href="#i-play"/></svg><span>打开播放器</span><span class="nav-external">↗</span></a><a href="#about" class="nav-item" data-view="about"><svg class="ic2"><use href="#i-info"/></svg><span>关于 NextMusic</span></a><div class="side-logout"><button class="nav-item" id="logout-btn"><svg class="ic2"><use href="#i-power"/></svg>退出登录</button></div></div>            <div class="side-ver" id="sidebar-version">NextMusic Server</div>
         </aside>
 
         <main class="main">
-            <!-- 移动端顶栏 -->
-            <div class="mobile-topbar">
-                <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="菜单"><svg class="ic2"><use href="#i-menu"/></svg></button>
-                <span style="font-size:14px;font-weight:700">NextMusic Server</span>
-            </div>
-
+            <header class="console-topbar">
+                <div class="topbar-place"><button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="展开导航"><svg class="ic2"><use href="#i-menu"/></svg></button><span>管理控制台</span><span class="topbar-sep">/</span><strong id="console-page-name">服务总览</strong></div>
+                <div class="topbar-actions"><span class="connection-state" id="console-connection"><i></i><span>正在连接</span></span><button class="icon-button" id="console-theme" aria-label="切换为深色主题" title="切换主题"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 14a8.5 8.5 0 0 1-10-10A8.5 8.5 0 1 0 20 14Z"/></svg></button><span class="admin-avatar" title="管理员">M</span><span class="admin-label">管理员</span></div>
+            </header>
             <!-- ============ 仪表盘 ============ -->
             <section class="view" id="view-dashboard">
-                <div class="crumb">Server / <b>仪表盘</b></div>
+                <div class="dashboard-heading"><div><div class="page-eyebrow">OVERVIEW</div><h2>服务总览</h2><p>音乐在流动，服务尽在掌握。</p></div><span class="overview-date" id="overview-date"></span></div>
                 <div class="glass welcome">
                     <div>
-                        <div class="wk">SERVER · <span class="sev"></span> <span id="dash-run-state">运行中</span> · UPTIME <span id="dash-uptime">-</span></div>
+                        <div class="wk"><span class="sev"></span> <span id="dash-run-state">正在连接</span> <span class="wk-divider">/</span> 持续运行 <span id="dash-uptime">-</span></div>
                         <div class="wt" id="greeting-text">你好</div>
                         <div class="wm" id="dash-summary"><b>-</b> 位用户 · <b>-</b> 台在线设备</div>
                     </div>
-                    <div class="wr">
-                        <button class="pill" id="dash-sync-btn"><svg class="ic"><use href="#i-play"/></svg> 立即同步</button>
-                        <button class="pill ghost" id="dash-snapshot-btn"><svg class="ic"><use href="#i-snap"/></svg> 创建快照</button>
-                        <button class="pill ghost" id="restart-server-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重启服务</button>
+                    <div class="welcome-art" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><div class="wr">
+                        <button class="pill" id="dash-sync-btn"><svg class="ic"><use href="#i-cloud"/></svg> 管理同步</button>
+                        <button class="pill ghost" id="dash-snapshot-btn"><svg class="ic"><use href="#i-snap"/></svg> 管理快照</button>
+                        <button class="pill ghost restart-quiet" id="restart-server-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重启服务</button>
                     </div>
                 </div>
                 <div class="stat-row">
                     <div class="stat">
-                        <div class="lbl">用户 <span class="sev"></span></div>
+                        <div class="lbl">注册用户 <svg class="metric-icon"><use href="#i-user"/></svg></div>
                         <div class="v"><span id="stat-users">0</span><span class="u">位</span></div>
                         <svg class="spark" id="spark-users" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
-                        <div class="lb2"><span id="dash-date">-</span><span>现在</span></div>
+                        <div class="lb2"><span id="dash-date">-</span><span>当前总数</span></div>
                     </div>
                     <div class="stat">
-                        <div class="lbl">同步连接 <span class="sev"></span></div>
+                        <div class="lbl">同步连接 <svg class="metric-icon"><use href="#i-cloud"/></svg></div>
                         <div class="v"><span id="stat-devices">0</span><span class="u">台</span></div>
                         <svg class="spark" id="spark-devices" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
                         <div class="lb2"><span>实时</span><span id="stat-cpu-info">-</span></div>
                     </div>
                     <div class="stat">
-                        <div class="lbl">CPU <span class="sev" id="sev-cpu"></span></div>
+                        <div class="lbl">CPU 使用率 <span class="sev" id="sev-cpu"></span></div>
                         <div class="v"><span id="stat-cpu">0</span><span class="u">%</span><span class="v2" id="stat-process-cpu"></span></div>
                         <svg class="spark" id="spark-cpu" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
-                        <div class="lb2"><span>系统</span><span>进程</span></div>
+                        <div class="lb2"><span>系统负载</span><span>进程占比见上方</span></div>
                     </div>
                     <div class="stat">
-                        <div class="lbl">内存 <span class="sev warn" id="sev-mem"></span></div>
+                        <div class="lbl">内存使用率 <span class="sev warn" id="sev-mem"></span></div>
                         <div class="v"><span id="stat-memory-percent">0</span><span class="u">%</span></div>
                         <div class="membar"><i id="membar-fill" style="width:0%"></i></div>
                         <div class="lb2"><span id="stat-memory">-</span><span id="stat-process-memory-percent"></span></div>
@@ -177,18 +162,18 @@
                 </div>
                 <div class="dash-lower">
                     <div class="panel">
-                        <div class="sec-hd"><h4>系统负载 · 实时</h4><span>每 3 秒采样</span></div>
+                        <div class="sec-hd"><h4>资源监控</h4><span>实时 · 每 3 秒采样</span></div>
                         <div class="chart-legend"><span><i style="background:#1ED760"></i>CPU %</span><span><i style="background:#4A90E2"></i>内存 %</span></div>
                         <div class="chart-box">
-                            <svg id="load-chart" viewBox="0 0 600 150" preserveAspectRatio="none"></svg>
+                            <svg id="load-chart" viewBox="0 0 600 150" preserveAspectRatio="none" role="img" aria-label="CPU 与内存使用率曲线"></svg><div class="chart-empty" id="chart-empty">正在采样，稍后显示实时曲线</div><div class="chart-axis"><span>最近 2 分钟以内 · 本次会话采样</span><span>现在</span></div>
                         </div>
                     </div>
                     <div class="panel">
-                        <div class="sec-hd"><h4>常用功能</h4></div>
+                        <div class="sec-hd"><h4>快捷操作</h4></div>
                         <div style="padding:14px 16px 0">
                             <div class="quick">
-                                <div class="q" data-qact="add-user"><div class="qi"><svg class="ic"><use href="#i-user"/></svg></div><div><b>新增用户</b><span>授权新设备</span></div></div>
-                                <div class="q" data-qact="snapshot"><div class="qi"><svg class="ic"><use href="#i-snap"/></svg></div><div><b>创建快照</b><span>全量备份</span></div></div>
+                                <div class="q" data-qact="add-user"><div class="qi"><svg class="ic"><use href="#i-user"/></svg></div><div><b>新增用户</b><span>创建同步账号</span></div></div>
+                                <div class="q" data-qact="snapshot"><div class="qi"><svg class="ic"><use href="#i-snap"/></svg></div><div><b>管理快照</b><span>按用户恢复数据</span></div></div>
                                 <div class="q" data-qact="config"><div class="qi"><svg class="ic"><use href="#i-gear"/></svg></div><div><b>修改配置</b><span>服务参数</span></div></div>
                                 <div class="q" data-qact="logs"><div class="qi"><svg class="ic"><use href="#i-log"/></svg></div><div><b>查看日志</b><span>运行状态</span></div></div>
                             </div>
@@ -206,16 +191,16 @@
                 <div class="vhd">
                     <div><h2>用户管理</h2><div class="sub" id="users-subtitle">管理服务器的同步用户</div></div>
                     <div class="acts">
-                        <div class="search-box"><svg class="ic"><use href="#i-search"/></svg><input type="text" id="user-search-input" placeholder="输入用户名搜索..."></div>
-                        <button class="pill ghost" id="refresh-users-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重载数据</button>
+                        <div class="search-box"><svg class="ic"><use href="#i-search"/></svg><input type="text" id="user-search-input" placeholder="输入用户名搜索..." aria-label="搜索用户"></div>
+                        <button class="pill ghost" id="refresh-users-btn"><svg class="ic"><use href="#i-refresh"/></svg> 刷新列表</button>
                         <button class="pill danger hidden" id="batch-delete-users-btn"><svg class="ic"><use href="#i-trash"/></svg> 批量删除 (<span id="user-selected-count">0</span>)</button>
                         <button class="pill" id="add-user-btn"><svg class="ic"><use href="#i-plus"/></svg> 新增用户</button>
                     </div>
                 </div>
                 <div class="table">
                     <div class="trow hd users-row">
-                        <span style="display:flex;align-items:center;gap:10px"><input type="checkbox" class="sel" id="select-all-users"> 用户</span>
-                        <span>连接密码</span><span class="col-devices">状态</span><span>自定义目录</span>
+                        <span><input type="checkbox" class="sel" id="select-all-users" aria-label="选择所有可见用户"></span><span>用户</span>
+                        <span>连接密码</span><span class="col-devices">账号</span><span>自定义目录</span>
                         <span style="text-align:right">操作</span>
                     </div>
                     <div id="users-list"></div>
@@ -250,9 +235,9 @@
             <section class="view hidden" id="view-config">
                 <div class="crumb">Server / <b>设置</b></div>
                 <div class="vhd">
-                    <div><h2>系统设置</h2><div class="sub">与 lxserver 配置项一一对应 · 修改后需保存生效</div></div>
+                    <div><h2>系统设置</h2><div class="sub">连接、安全与存储配置 · 修改后保存生效</div></div>
                     <div class="acts">
-                        <button class="pill ghost" id="reload-config-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重载配置文件</button>
+                        <button class="pill ghost" id="reload-config-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重新加载配置</button>
                         <button class="pill ghost" id="restart-server-config-btn"><svg class="ic"><use href="#i-refresh"/></svg> 重启服务</button>
                     </div>
                 </div>
@@ -262,7 +247,7 @@
                         <button type="button" class="ctab on" data-t="t0" onclick="app.ctab(this)">基本</button>
                         <button type="button" class="ctab" data-t="t1" onclick="app.ctab(this)">访问与安全</button>
                         <button type="button" class="ctab" data-t="t2" onclick="app.ctab(this)">公开访问权限</button>
-                        <button type="button" class="ctab" data-t="t3" onclick="app.ctab(this)">音乐源与Subsonic</button>
+                        <button type="button" class="ctab" data-t="t3" onclick="app.ctab(this)">音乐源与 Subsonic</button>
                         <button type="button" class="ctab" data-t="t4" onclick="app.ctab(this)">存储备份</button>
                     </div>
 
@@ -483,9 +468,9 @@
                     </div>
 
                     <div class="save-bar">
-                        <div class="inner">
+                        <div class="inner"><span class="save-status" id="config-save-status"><i></i>配置已同步</span>
                             <button type="button" class="pill ghost" id="config-discard-btn">放弃更改</button>
-                            <button type="submit" class="pill"><svg class="ic"><use href="#i-check"/></svg> 保存全部配置</button>
+                            <button type="submit" class="pill" id="config-save-btn"><svg class="ic"><use href="#i-check"/></svg> 保存全部配置</button>
                         </div>
                     </div>
                 </form>
@@ -715,6 +700,7 @@
     </div></div>
 
     <script src="app.js"></script>
+    <script src="console.js"></script>
 </body>
 
 </html>

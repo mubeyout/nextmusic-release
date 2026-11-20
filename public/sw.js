@@ -1,17 +1,17 @@
-const CACHE_NAME = 'lx-sync-server-v3';
+const CACHE_NAME = 'lx-sync-server-console-v4';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
     './style.css',
     './app.js',
+    './console.css',
+    './console.js',
     './js/ui-utils.js',
     './js/notification-engine.js',
     './icon.svg',
     './manifest.json',
     './vendor/js/marked.min.js',
-    './vendor/fonts/inter.css',
-    './music/assets/tailwindcss.js',
-    './music/assets/fontawesome/css/all.min.css'
+    './vendor/fonts/inter.css'
 ];
 
 self.addEventListener('install', (event) => {
@@ -70,7 +70,7 @@ self.addEventListener('activate', (event) => {
         caches.keys().then((cacheNames) => {
             return Promise.all(
                 cacheNames.map((cacheName) => {
-                    if (cacheName !== CACHE_NAME) {
+                    if (cacheName !== CACHE_NAME && cacheName.startsWith('lx-sync-server-')) {
                         return caches.delete(cacheName);
                     }
                 })

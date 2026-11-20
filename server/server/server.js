@@ -405,6 +405,7 @@ const verifyUserAuth = (req, tokenOverride) => {
     return null;
 };
 exports.verifyUserAuth = verifyUserAuth;
+const clientGateway = require('./client-gateway.cjs')(req => (0, exports.verifyUserAuth)(req));
 const getCacheRequestUsername = (req) => {
     const requested = req.headers['x-user-name'] || '';
     if (!requested || requested === 'default' || requested === 'open' || requested === '_open')
@@ -1988,6 +1989,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 }
                 return;
             }
+            if (pathname === '/api/user/request' || pathname === '/api/user/media' || pathname.startsWith('/api/user/media/')) { void clientGateway(req,res); return; }
             // [新增] User Login Verification
             if (pathname === '/api/user/verify' && req.method === 'POST') {
                 void readBody(req).then(body => {

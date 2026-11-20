@@ -50,7 +50,7 @@ class App {
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', (e) => {
                 const view = item.dataset.view;
-                if (view === 'music') return; // 播放器链接直接跳转
+                if (!view || view === 'music') return; // 播放器链接直接跳转
                 e.preventDefault();
                 this.switchView(view);
                 this.closeMobileSidebar();
@@ -82,12 +82,9 @@ class App {
         document.getElementById('add-user-btn')?.addEventListener('click', () => this.showAddUserModal());
         document.getElementById('refresh-users-btn')?.addEventListener('click', async () => {
             try {
-                await this.saveConfig(true);
-                await this.request('/api/admin/reload', { method: 'POST' });
-                this.loadUsers();
-                this.loadDashboard();
-                showSuccess('重载数据成功');
-            } catch (err) { showError('重载数据失败: ' + err.message); }
+                await this.loadUsers();
+                showSuccess('用户列表已刷新');
+            } catch (err) { showError('刷新列表失败: ' + err.message); }
         });
         document.getElementById('batch-delete-users-btn')?.addEventListener('click', () => this.batchDeleteUsers());
         document.getElementById('select-all-users')?.addEventListener('change', (e) => this.toggleAllUsers(e.target.checked));
@@ -129,10 +126,9 @@ class App {
         // 配置
         document.getElementById('config-form')?.addEventListener('submit', (e) => { e.preventDefault(); this.saveConfig(); });
         document.getElementById('reload-config-btn')?.addEventListener('click', async () => {
-            await this.saveConfig(true);
-            this.loadConfig();
+            if (await (window.NextConsole?.canDiscard() ?? true)) this.loadConfig();
         });
-        document.getElementById('config-discard-btn')?.addEventListener('click', () => { this.loadConfig(); showInfo('已放弃未保存的更改'); });
+        document.getElementById('config-discard-btn')?.addEventListener('click', async () => { if (await (window.NextConsole?.canDiscard() ?? true)) { await this.loadConfig(); } });
         document.querySelector('input[name="user.enablePublicFavorites"]')?.addEventListener('change', () => this.togglePublicNonAdminAccessVisibility());
         document.querySelector('input[name="user.enablePublicRestriction"]')?.addEventListener('change', () => this.togglePublicNonAdminLocalMusicVisibility());
 
@@ -245,6 +241,9 @@ class App {
 
     /* ================= 视图切换 ================= */
     async switchView(viewName) {
+        if (viewName === this.currentView && viewName === 'config') return;
+        if (this.currentView === 'config' && !(await (window.NextConsole?.canDiscard(true) ?? true))) return;
+        window.NextConsole?.viewChanged(viewName);
         document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('on', item.dataset.view === viewName));
         document.querySelectorAll('.view').forEach(view => view.classList.toggle('hidden', view.id !== `view-${viewName}`));
         this.currentView = viewName;
@@ -254,7 +253,7 @@ class App {
             case 'dashboard': this.loadDashboard(); break;
             case 'users': this.loadUsers(); break;
             case 'data': this.loadUserData(); break;
-            case 'config': this.loadConfig(); break;
+            case 'config': if (!this.configLoaded) this.loadConfig(); break;
             case 'logs': this.loadLogs(); break;
             case 'webdav':
                 try {
@@ -291,6 +290,7 @@ class App {
             this.renderUserMenu('snapshot');
             this.startMonitor();
         } catch (err) {
+            window.NextConsole?.connection(false);
             console.error('Failed to load dashboard:', err);
         }
     }
@@ -321,11 +321,12 @@ class App {
             try {
                 const status = await this.request('/api/status');
                 this.updateDashboard(status);
-            } catch (e) { /* 静默重试 */ }
+            } catch (e) { window.NextConsole?.connection(false); }
         }, 3000);
     }
 
     updateDashboard(status) {
+        window.NextConsole?.connection(true);
         const sysCpu = parseFloat(status.cpuUsage) || 0;
         const procCpu = parseFloat(status.processCpuUsage) || 0;
         const sysMem = parseFloat(status.systemMemoryUsage) || 0;
@@ -369,7 +370,7 @@ class App {
         const wd = document.getElementById('webdav-state-dash');
         if (wd) wd.textContent = status.isWebDAVConfigured ? '已配置' : '未配置';
         const ss = document.getElementById('subsonic-state-dash');
-        if (ss) ss.textContent = status.isSubsonicEnabled === false ? '未启用' : '运行中';
+        if (ss) ss.textContent = status.isSubsonicEnabled === true ? '已启用' : status.isSubsonicEnabled === false ? '未启用' : '未知';
 
         // 关于页同步
         set('about-uptime', this.formatUptime(status.uptime));
@@ -377,12 +378,8 @@ class App {
     }
 
     renderUsersSpark() {
-        const svg = document.getElementById('spark-users');
-        if (!svg) return;
-        // 用户数无曲线：显示静态绿色装饰波形
-        svg.innerHTML = `<defs><linearGradient id="gu1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1ED760" stop-opacity=".4"/><stop offset="1" stop-color="#1ED760" stop-opacity=".04"/></linearGradient></defs>
-        <path d="M0,18 L14,14 L28,17 L42,10 L56,13 L70,7 L84,11 L100,6 L100,30 L0,30 Z" fill="url(#gu1)"/>
-        <path d="M0,18 L14,14 L28,17 L42,10 L56,13 L70,7 L84,11 L100,6" fill="none" stroke="#1ED760" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linecap="round"/>`;
+        // 用户总数不使用装饰性增长曲线，避免误导。
+        document.getElementById('spark-users')?.replaceChildren();
     }
 
     renderSpark(id, data, color) {
@@ -405,7 +402,9 @@ class App {
 
     renderLoadChart() {
         const svg = document.getElementById('load-chart');
-        if (!svg || this.cpuHistory.length < 2) return;
+        if (!svg) return;
+        document.getElementById('chart-empty')?.classList.toggle('hidden', this.cpuHistory.length >= 2);
+        if (this.cpuHistory.length < 2) return;
         const W = 600, H = 150, pad = 8;
         const line = (data, maxScale) => {
             const n = data.length;
@@ -421,14 +420,14 @@ class App {
         const cpuL = line(this.cpuHistory, 100);
         const memL = line(this.memHistory, 100);
         svg.innerHTML = `
-            <g stroke="rgba(255,255,255,.06)" stroke-width="1">
-                <line x1="0" y1="30" x2="600" y2="30"/><line x1="0" y1="60" x2="600" y2="60"/>
-                <line x1="0" y1="90" x2="600" y2="90"/><line x1="0" y1="120" x2="600" y2="120"/>
+            <g stroke="var(--line)" stroke-width="1">
+                <line x1="0" y1="41.5" x2="600" y2="41.5"/><line x1="0" y1="75" x2="600" y2="75"/>
+                <line x1="0" y1="108.5" x2="600" y2="108.5"/><line x1="0" y1="142" x2="600" y2="142"/>
             </g>
-            <text x="4" y="26" fill="#6A6A6A" font-size="9">75%</text>
-            <text x="4" y="56" fill="#6A6A6A" font-size="9">50%</text>
-            <text x="4" y="86" fill="#6A6A6A" font-size="9">25%</text>
-            <text x="4" y="116" fill="#6A6A6A" font-size="9">0%</text>
+            <text x="4" y="38" fill="var(--muted)" font-size="9">75%</text>
+            <text x="4" y="72" fill="var(--muted)" font-size="9">50%</text>
+            <text x="4" y="106" fill="var(--muted)" font-size="9">25%</text>
+            <text x="4" y="140" fill="var(--muted)" font-size="9">0%</text>
             <path d="${cpuL.d} L 600 150 L 0 150 Z" fill="rgba(30,215,96,.10)"/>
             <path d="${cpuL.d}" fill="none" stroke="#1ED760" stroke-width="2" stroke-linecap="round"/>
             <path d="${memL.d}" fill="none" stroke="#4A90E2" stroke-width="2" stroke-linecap="round" opacity=".85"/>
@@ -445,7 +444,7 @@ class App {
         menu.innerHTML = this.allUsers.map(user => {
             const isPublic = user.name === '_open';
             const label = isPublic ? '公开用户' : this.escapeHtml(user.name);
-            return `<div class="usel-item ${user.name === current ? 'on' : ''}" onclick="app.selectUser('${type}', '${this.escapeHtml(user.name)}')">
+            return `<div class="usel-item ${user.name === current ? 'on' : ''}" onclick="app.selectUser('${type}', '${this.escapeJs(user.name)}')">
                 <span class="mini-ava" style="background:${stringToColor(user.name)}">${isPublic ? '⌘' : this.escapeHtml(user.name.charAt(0).toUpperCase())}</span>
                 <span>${label}${isPublic ? ' (_open)' : ''}</span>
                 ${user.name === current ? '<svg class="ck ic" viewBox="0 0 24 24"><use href="#i-check"/></svg>' : ''}
@@ -479,7 +478,7 @@ class App {
         }
         container.innerHTML = `<div class="glass"><div class="user-grid">${this.allUsers.map(user => {
             const isPublic = user.name === '_open';
-            return `<div class="user-cell" onclick="app.selectUser('${type}', '${this.escapeHtml(user.name)}')">
+            return `<div class="user-cell" onclick="app.selectUser('${type}', '${this.escapeJs(user.name)}')">
                 <div class="ava" style="background:${stringToColor(user.name)}">${isPublic ? '⌘' : this.escapeHtml(user.name.charAt(0).toUpperCase())}</div>
                 <b>${isPublic ? '公开用户' : this.escapeHtml(user.name)}</b>
                 <span>${isPublic ? '公共数据与歌单' : '用户数据'}</span>
@@ -493,7 +492,8 @@ class App {
             this.users = users.filter(u => u.name !== '_open');
             this.renderUsers();
         } catch (err) {
-            console.error('Failed to load users:', err);
+            document.getElementById('users-list').innerHTML = '<div class="empty-state">用户列表加载失败，请刷新重试</div>';
+            showError('用户列表加载失败');
         }
     }
 
@@ -503,20 +503,22 @@ class App {
         if (sub) sub.textContent = `${this.users.length} 位注册用户`;
         if (!this.users.length) {
             container.innerHTML = `<div class="empty-state">暂无用户，点击右上角「新增用户」创建第一个同步账号</div>`;
+            this.updateUserBatchBtn();
             return;
         }
         container.innerHTML = this.users.map((user, index) => `
             <div class="trow users-row" data-username="${this.escapeHtml(user.name.toLowerCase())}">
+                <span><input type="checkbox" class="sel user-checkbox" data-index="${index}" aria-label="选择用户 ${this.escapeHtml(user.name)}" onchange="app.updateUserBatchBtn()"></span>
                 <span>
                     <span class="u-name"><span class="ava" style="background:${stringToColor(user.name)}">${this.escapeHtml(user.name.charAt(0).toUpperCase())}</span><b>${this.escapeHtml(user.name)}</b>
                     ${user.enableCustomMusicDir ? '<span class="badge blue" style="margin-left:6px">自定义目录</span>' : ''}
                     <span class="u-sub" style="width:100%;margin-left:40px">${user.password ? '******' : ''}</span></span>
                 </span>
                 <span class="row-acts" style="justify-content:flex-start">
-                    <button class="mini" onclick="app.togglePasswordVisibility(${index})"><svg class="mbtn-ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg></button>
+                    <button class="mini" aria-label="显示或隐藏连接密码" onclick="app.togglePasswordVisibility(${index})"><svg class="mbtn-ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg></button>
                     <button class="mini" onclick="app.showEditPasswordModal(${index})">改密</button>
                 </span>
-                <span class="col-devices"><span class="badge ok">活跃</span></span>
+                <span class="col-devices"><span class="badge">已创建</span></span>
                 <span style="font-size:11px;color:var(--muted)">${user.enableCustomMusicDir ? this.escapeHtml(user.customMusicDir || '未设置') : '—'}</span>
                 <span class="row-acts">
                     <button class="mini" onclick="app.showRenameUserModal(${index})">配置</button>
@@ -527,6 +529,7 @@ class App {
         const selectAll = document.getElementById('select-all-users');
         if (selectAll) selectAll.checked = false;
         this.updateUserBatchBtn();
+        this.filterUsers();
     }
 
     filterUsers() {
@@ -534,12 +537,17 @@ class App {
         document.querySelectorAll('#users-list .users-row').forEach(row => {
             row.style.display = (row.dataset.username || '').includes(query) ? '' : 'none';
         });
+        let empty = document.getElementById('users-filter-empty');
+        if (!empty) { empty = document.createElement('div'); empty.id = 'users-filter-empty'; empty.className = 'empty-state hidden'; empty.textContent = '没有匹配的用户，请尝试其他关键词'; document.getElementById('users-list').append(empty); }
+        const visible = Array.from(document.querySelectorAll('#users-list .users-row')).some(row => row.style.display !== 'none');
+        empty.classList.toggle('hidden', visible || !this.users.length);
+        this.updateUserBatchBtn();
     }
 
     togglePasswordVisibility(index) {
         const user = this.users[index];
         if (!user) return;
-        const sub = document.querySelector(`#users-list .users-row[data-username="${user.name.toLowerCase()}"] .u-sub`);
+        const sub = Array.from(document.querySelectorAll('#users-list .users-row')).find(row => row.dataset.username === user.name.toLowerCase())?.querySelector('.u-sub');
         if (sub) sub.textContent = sub.textContent === '******' ? (user.password || '') : '******';
     }
 
@@ -629,7 +637,7 @@ class App {
             const modal = document.getElementById('modal');
             document.getElementById('modal-title').textContent = '删除确认';
             document.getElementById('modal-body').innerHTML = `
-                <p style="font-size:13px;line-height:1.7">${message}</p>
+                <p style="font-size:13px;line-height:1.7">${this.escapeHtml(message)}</p>
                 <label style="display:flex;align-items:center;gap:8px;margin-top:16px;font-size:12.5px;cursor:pointer">
                     <input type="checkbox" class="sel" id="confirm-delete-data" style="width:15px;height:15px">
                     同时删除用户数据文件夹（不可恢复）
@@ -667,8 +675,13 @@ class App {
             countSpan.textContent = checked.length;
         }
         const selectAll = document.getElementById('select-all-users');
-        const all = document.querySelectorAll('.user-checkbox');
-        if (selectAll) selectAll.checked = all.length > 0 && checked.length === all.length;
+        const all = Array.from(document.querySelectorAll('.user-checkbox')).filter(cb => cb.closest('.users-row').style.display !== 'none');
+        if (selectAll) {
+            const selected = all.filter(cb => cb.checked).length;
+            selectAll.checked = all.length > 0 && selected === all.length;
+            selectAll.indeterminate = selected > 0 && selected < all.length;
+            selectAll.disabled = all.length === 0;
+        }
     }
 
     setUserConfigConfirmBtnState(enabled) {
@@ -1297,6 +1310,7 @@ class App {
             if (navPlayerLink) navPlayerLink.href = config['player.path'] === '' ? '/' : (config['player.path'] ?? '/');
             const aboutName = document.getElementById('about-servername');
             if (aboutName) aboutName.textContent = config.serverName || '-';
+            window.NextConsole?.configSaved();
         } catch (err) {
             console.error('Failed to load config:', err);
         }
@@ -1315,7 +1329,7 @@ class App {
     }
 
     async saveConfig(silent = false) {
-        if (!this.configLoaded) return;
+        if (!this.configLoaded) { showError('配置尚未加载，请稍后重试'); return false; }
         const form = document.getElementById('config-form');
         const formData = new FormData(form);
 
@@ -1332,7 +1346,7 @@ class App {
             errEl.textContent = pathError;
             errEl.classList.toggle('show', !!pathError);
         }
-        if (pathError) { if (!silent) showError('路径配置有误，请检查'); return; }
+        if (pathError) { document.querySelector('.ctab[data-t="t1"]')?.click(); errEl?.scrollIntoView({block:'center'}); if (!silent) showError('路径配置有误，请检查'); return false; }
 
         const on = k => formData.get(k) === 'on';
         const config = {
@@ -1381,6 +1395,7 @@ class App {
 
         try {
             const res = await this.request('/api/config', { method: 'POST', body: JSON.stringify(config) });
+            window.NextConsole?.configSaved();
             if (config['frontend.password'] && config['frontend.password'] !== this.password) {
                 this.password = config['frontend.password'];
                 localStorage.setItem('lx_auth', config['frontend.password']);
@@ -1465,6 +1480,7 @@ class App {
     }
 
     async backupToWebDAV() {
+        if (!this.ensureWebDAVConfigured()) return;
         if (!(await showSelect('WebDAV 备份', '确定要创建全量备份并上传到 WebDAV 吗？'))) return;
         const statusEl = document.getElementById('sync-status-content');
         statusEl.innerHTML = '<p style="color:var(--amber)">正在备份...</p>';
@@ -1485,6 +1501,7 @@ class App {
     }
 
     async restoreFromWebDAV() {
+        if (!this.ensureWebDAVConfigured()) return;
         if (!(await showSelect('WebDAV 恢复', '警告：从云端恢复将覆盖本地所有数据！\n\n确定要继续吗？', { danger: true }))) return;
         const statusEl = document.getElementById('sync-status-content');
         statusEl.innerHTML = '<p style="color:var(--amber)">正在从云端恢复数据...</p>';
@@ -1502,6 +1519,7 @@ class App {
     }
 
     async syncFilesToWebDAV() {
+        if (!this.ensureWebDAVConfigured()) return;
         if (!(await showSelect('同步文件', '确定要强制同步所有文件到 WebDAV 吗？'))) return;
         const statusEl = document.getElementById('sync-status-content');
         statusEl.innerHTML = '<p style="color:var(--amber)">正在同步文件...</p>';
@@ -1592,9 +1610,15 @@ class App {
     }
 
     checkWebDAVConfig(isConfigured) {
+        this.webdavConfigured = !!isConfigured;
         document.getElementById('webdav-cloud-group')?.classList.toggle('hidden', !isConfigured);
         document.getElementById('webdav-logs-section')?.classList.toggle('hidden', !isConfigured);
         document.getElementById('webdav-config-guide')?.classList.toggle('hidden', isConfigured);
+        const syncBtn = document.getElementById('sync-files-btn');
+        if (syncBtn) {
+            syncBtn.classList.toggle('hidden', !isConfigured);
+            syncBtn.disabled = !isConfigured;
+        }
         const sev = document.getElementById('webdav-sev');
         const line = document.getElementById('webdav-state-line');
         if (sev) sev.className = 'sev' + (isConfigured ? '' : ' warn');
@@ -1607,6 +1631,12 @@ class App {
                 }
             }).catch(() => { });
         }
+    }
+
+    ensureWebDAVConfigured() {
+        if (this.webdavConfigured) return true;
+        showInfo('尚未配置 WebDAV，请先在「设置 · 存储备份」中填写连接参数');
+        return false;
     }
 
     jumpToWebDAVConfig() {
@@ -1717,11 +1747,24 @@ class App {
     }
 
     async downloadFile(filePath) {
-        const url = `/api/files/download?path=${encodeURIComponent(filePath)}`;
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filePath.split('/').pop();
-        a.click();
+        try {
+            const auth = this.password || localStorage.getItem('lx_auth') || '';
+            const resp = await fetch(`/api/files/download?path=${encodeURIComponent(filePath)}`, {
+                headers: { 'X-Frontend-Auth': auth }
+            });
+            if (!resp.ok) throw new Error(resp.status === 401 ? '未授权，请重新登录' : `下载失败 (${resp.status})`);
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filePath.split('/').pop();
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (err) {
+            showError('下载文件失败: ' + err.message);
+        }
     }
 
     async deleteFile(filePath, isDirectory) {
@@ -1745,7 +1788,7 @@ class App {
             }
             const SRC = { tx: 'QQ', wy: '网易', kw: '酷我', kg: '酷狗', mg: '咪咕', git: 'Git' };
             container.innerHTML = list.map(cs => `
-                <div class="trow users-row" style="grid-template-columns:2.4fr 1fr 1fr .6fr 1.4fr">
+                <div class="trow users-row" style="grid-template-columns:2.4fr 1fr 1fr 1.2fr 1.4fr">
                     <span><b>${this.escapeHtml(cs.name)}</b><div class="u-sub">${this.escapeHtml(cs.author || '')}${cs.description ? ' · ' + this.escapeHtml(cs.description.slice(0, 30)) : ''}</div></span>
                     <span>${this.escapeHtml(cs.version || '-')}</span>
                     <span style="font-size:11px;color:var(--text2)">${(cs.supportedSources || []).map(x => SRC[x] || x).join(' ')}</span>
@@ -1786,7 +1829,7 @@ class App {
         const url = await showInput('URL 添加音源', '音源脚本 URL(共享,全端可用)：');
         if (!url) return;
         try {
-            await this.request('/api/custom-source/upload', {
+            await this.request('/api/custom-source/import', {
                 method: 'POST',
                 body: JSON.stringify({ url })
             });
@@ -2084,7 +2127,7 @@ class App {
     escapeHtml(text) {
         const div = document.createElement('div');
         div.textContent = text == null ? '' : String(text);
-        return div.innerHTML;
+        return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     escapeJs(text) {

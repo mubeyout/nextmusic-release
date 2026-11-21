@@ -2326,6 +2326,18 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             }
             // [新增] Get User List (User Auth)
             // [新增] Get User List (User Auth)
+            // [KAI 1121] update.json 更新通道恢复
+            if (pathname === '/downloads/update.json' && req.method === 'GET') {
+                try {
+                    const data = await node_fs_1.default.promises.readFile('/mnt/sda1/Web/downloads/update.json', 'utf8');
+                    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+                    res.end(data);
+                } catch (e) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'update.json not found' }));
+                }
+                return;
+            }
             if (pathname === '/api/user/list' && req.method === 'GET') {
                 const targetUserParam = urlObj.searchParams.get('user');
                 const reqUsername = req.headers['x-user-name'] || targetUserParam || '';
@@ -2341,9 +2353,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 if (!username) {
                     username = (0, exports.verifyUserAuth)(req);
                 }
-                if (!username && reqUsername && reqUsername !== '_open') {
-                    username = reqUsername;
-                }
+                // [KAI 1121 越权修复] 无认证 fallback 已删
                 if (!username) {
                     res.writeHead(401, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));

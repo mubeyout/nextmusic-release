@@ -111,7 +111,7 @@
                 </span>
                 <b>NextMusic</b>
             </div>
-<div class="console-edition">管理控制台 <span>SERVER</span></div><nav aria-label="主导航"><div class="nav-label">工作台</div><a href="#dashboard" class="nav-item on" data-view="dashboard"><svg class="ic2"><use href="#i-dash"/></svg><span>服务总览</span></a><div class="nav-label">内容与用户</div><a href="#users" class="nav-item" data-view="users"><svg class="ic2"><use href="#i-user"/></svg><span>用户管理</span></a><a href="#data" class="nav-item" data-view="data"><svg class="ic2"><use href="#i-music"/></svg><span>音乐数据</span></a><a href="#sources" class="nav-item" data-view="sources"><svg class="ic2"><use href="#i-wave"/></svg><span>音源管理</span></a><div class="nav-label">同步与存储</div><a href="#webdav" class="nav-item" data-view="webdav"><svg class="ic2"><use href="#i-cloud"/></svg><span>云端同步</span></a><a href="#snapshots" class="nav-item" data-view="snapshots"><svg class="ic2"><use href="#i-snap"/></svg><span>快照备份</span></a><a href="#files" class="nav-item" data-view="files"><svg class="ic2"><use href="#i-folder"/></svg><span>文件管理</span></a><div class="nav-label">系统</div><a href="#logs" class="nav-item" data-view="logs"><svg class="ic2"><use href="#i-log"/></svg><span>运行日志</span></a><a href="#config" class="nav-item" data-view="config"><svg class="ic2"><use href="#i-gear"/></svg><span>系统设置</span></a></nav><div class="side-b"><a class="nav-item" data-view="music" id="nav-player-link" target="_blank" rel="noopener"><svg class="ic2"><use href="#i-play"/></svg><span>打开播放器</span><span class="nav-external">↗</span></a><a href="#about" class="nav-item" data-view="about"><svg class="ic2"><use href="#i-info"/></svg><span>关于 NextMusic</span></a><div class="side-logout"><button class="nav-item" id="logout-btn"><svg class="ic2"><use href="#i-power"/></svg>退出登录</button></div></div>            <div class="side-ver" id="sidebar-version">NextMusic Server</div>
+<div class="console-edition">管理控制台 <span>SERVER</span></div><nav aria-label="主导航"><div class="nav-label">工作台</div><a href="#dashboard" class="nav-item on" data-view="dashboard"><svg class="ic2"><use href="#i-dash"/></svg><span>服务总览</span></a><div class="nav-label">内容与用户</div><a href="#users" class="nav-item" data-view="users"><svg class="ic2"><use href="#i-user"/></svg><span>用户管理</span></a><a href="#data" class="nav-item" data-view="data"><svg class="ic2"><use href="#i-music"/></svg><span>音乐数据</span></a><a href="#sources" class="nav-item" data-view="sources"><svg class="ic2"><use href="#i-wave"/></svg><span>音源管理</span></a><a href="#library" class="nav-item" data-view="library"><svg class="ic2"><use href="#i-disc"/></svg><span>曲库管理</span></a><div class="nav-label">同步与存储</div><a href="#webdav" class="nav-item" data-view="webdav"><svg class="ic2"><use href="#i-cloud"/></svg><span>云端同步</span></a><a href="#snapshots" class="nav-item" data-view="snapshots"><svg class="ic2"><use href="#i-snap"/></svg><span>快照备份</span></a><a href="#files" class="nav-item" data-view="files"><svg class="ic2"><use href="#i-folder"/></svg><span>文件管理</span></a><div class="nav-label">系统</div><a href="#logs" class="nav-item" data-view="logs"><svg class="ic2"><use href="#i-log"/></svg><span>运行日志</span></a><a href="#config" class="nav-item" data-view="config"><svg class="ic2"><use href="#i-gear"/></svg><span>系统设置</span></a></nav><div class="side-b"><a class="nav-item" data-view="music" id="nav-player-link" target="_blank" rel="noopener"><svg class="ic2"><use href="#i-play"/></svg><span>打开播放器</span><span class="nav-external">↗</span></a><a href="#about" class="nav-item" data-view="about"><svg class="ic2"><use href="#i-info"/></svg><span>关于 NextMusic</span></a><div class="side-logout"><button class="nav-item" id="logout-btn"><svg class="ic2"><use href="#i-power"/></svg>退出登录</button></div></div>            <div class="side-ver" id="sidebar-version">NextMusic Server</div>
         </aside>
 
         <main class="main">
@@ -196,6 +196,16 @@
                         <button class="pill danger hidden" id="batch-delete-users-btn"><svg class="ic"><use href="#i-trash"/></svg> 批量删除 (<span id="user-selected-count">0</span>)</button>
                         <button class="pill" id="add-user-btn"><svg class="ic"><use href="#i-plus"/></svg> 新增用户</button>
                     </div>
+                </div>
+                <div class="glass" style="margin-bottom:16px;padding:16px 18px">
+                    <div class="lib-grid">
+                        <div class="field" style="margin:0"><label>启用云曲库配额限制</label><div class="cswitch" id="quota-enabled-switch" onclick="app.quotaToggleEnabled()"><div class="knob"></div></div></div>
+                        <div class="field" style="margin:0"><label>默认配额(MB)</label><div class="cfg-btns"><input type="number" class="inp" id="quota-default" style="width:140px" min="0"><button class="mini" id="quota-default-btn">保存</button></div></div>
+                    </div>
+                </div>
+                <div class="glass hidden" id="user-requests-box" style="margin-bottom:16px;padding:16px 18px">
+                    <h3 style="margin:0 0 10px">待审批申请</h3>
+                    <div id="user-requests"></div>
                 </div>
                 <div class="table">
                     <div class="trow hd users-row">
@@ -493,6 +503,61 @@
                         <span>音源</span><span>版本</span><span>平台</span><span>状态</span><span style="text-align:right">操作</span>
                     </div>
                     <div id="cs-list"></div>
+                </div>
+            </section>
+
+            <!-- ============ 曲库管理 ============ -->
+            <section class="view hidden" id="view-library">
+                <div class="crumb">Server / <b>曲库管理</b></div>
+                <div class="vhd">
+                    <div><h2>曲库管理</h2><div class="sub">公共曲库 · 曲源 · 授权 · 云曲库配额</div></div>
+                    <div class="acts">
+                        <button class="pill ghost" id="lib-refresh-btn"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+                        <button class="pill" id="lib-add-btn"><svg class="ic"><use href="#i-plus"/></svg> 添加曲源</button>
+                    </div>
+                </div>
+
+                <div class="glass" style="margin-bottom:16px;padding:18px">
+                    <div class="vhd" style="margin-bottom:12px"><div><h3 style="margin:0">公共曲库</h3><div class="sub" id="lib-scan-sub">扫描状态读取中…</div></div></div>
+                    <div class="lib-grid">
+                        <div class="field"><label>启用公共曲库</label><div class="cswitch" id="lib-enabled-switch" onclick="app.libToggleEnabled()"><div class="knob"></div></div></div>
+                        <div class="field"><label>名称</label><input type="text" class="inp" id="lib-name" placeholder="公共曲库"></div>
+                        <div class="field"><label>本地目录(本地源)</label><input type="text" class="inp" id="lib-dir" placeholder="/data/music/public"></div>
+                        <div class="cfg-btns" style="justify-content:flex-end;align-self:end">
+                            <button class="pill ghost" id="lib-scan-btn">立即扫描</button>
+                            <button class="pill" id="lib-save-btn">保存配置</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="table" style="margin-bottom:16px">
+                    <div class="trow hd users-row" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr 1.5fr">
+                        <span>曲源</span><span>类型</span><span>歌曲</span><span>状态</span><span>定时同步</span><span style="text-align:right">操作</span>
+                    </div>
+                    <div id="lib-sources"></div>
+                </div>
+
+                <div class="glass" style="margin-bottom:16px;padding:18px">
+                    <div class="vhd" style="margin-bottom:12px"><div><h3 style="margin:0 0 4px">公共曲库曲目</h3><div class="sub" id="lib-songs-sub">读取中…</div></div></div>
+                    <div class="lib-two-col" style="margin-bottom:12px">
+                        <select id="lib-song-source" class="inp" onchange="app.libSongSearch()"><option value="">全部曲源</option></select>
+                        <div class="cfg-btns"><input class="inp" id="lib-song-kw" placeholder="歌名 / 歌手 / 专辑 / 文件名" onkeydown="if(event.key==='Enter')app.libSongSearch()"><button class="mini" onclick="app.libSongSearch()">检索</button></div>
+                    </div>
+                    <div class="table">
+                        <div class="trow hd users-row" style="grid-template-columns:2fr 1fr 1fr 1fr auto">
+                            <span>曲目</span><span>歌手</span><span>专辑</span><span>曲源</span><span style="text-align:right">操作</span>
+                        </div>
+                        <div id="lib-songs"></div>
+                    </div>
+                    <div class="cfg-btns" style="justify-content:space-between;margin-top:10px">
+                        <span class="u-sub" id="lib-songs-page"></span>
+                        <span class="row-acts"><button class="mini" onclick="app.libSongPage(-1)">上一页</button><button class="mini" onclick="app.libSongPage(1)">下一页</button></span>
+                    </div>
+                </div>
+
+                <div class="glass" style="margin-top:16px;padding:18px">
+                    <h3 style="margin:0 0 10px">旧共享库迁移</h3>
+                    <div id="lib-legacy"></div>
                 </div>
             </section>
 

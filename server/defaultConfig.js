@@ -18,6 +18,12 @@ const config = {
     'user.enableLoginCacheRestriction': false, // 是否启用登录用户缓存限制
     'user.enableCacheSizeLimit': false, // 是否启用缓存空间限制
     'user.cacheSizeLimit': 2000, // 缓存空间限制大小 (MB)
+    // [曲库体系 v2] 云曲库配额(见 server/server/publicLibrary.js;决策 5:默认 10GB 后台可改)
+    'cloudLibrary.enableQuota': true, // 是否启用云曲库配额
+    'cloudLibrary.defaultQuotaMB': 10240, // 云曲库默认配额 (MB);逐账号覆盖在运行时 cloudLibrary.userQuotaMB
+    // [曲库体系 v2] 公共曲库(吸收合并旧 sharedLibraries,过渡共存;字段语义见 publicLibrary.js DEFAULT_PUBLIC)
+    // [v2.2 多源] sources=多源源表(本地目录/WebDAV/OpenList 三型,见 normalizeSource);旧单目录 dir 自动迁移为首个本地源
+    publicLibrary: { enabled: false, name: '公共曲库', dir: '', sources: [], authorizedUsers: [], userPrefs: {}, scan: { syncedAt: 0, songs: 0, albums: 0, artists: 0, totalBytes: 0 }, migratedFrom: [] },
     maxSnapshotNum: 10, // 公共最大备份快照数
     'list.addMusicLocationType': 'top', // 公共添加歌曲到我的列表时的位置 top | bottom，参考客户端的「设置 → 列表设置 → 添加歌曲到列表时的位置」
     disableTelemetry: false, // 是否禁用数据收集（仅用于开源项目改进，不含敏感信息）
@@ -59,11 +65,7 @@ const config = {
     'subsonic.onlineSearch': true, // 是否开启 Subsonic 在线全网搜索
     'subsonic.onlineSearchMode': 'fallback', // 在线搜索模式: fallback | merge | local_only
     'subsonic.onlineSearchSources': 'wy,tx,kw,kg,mg', // 在线搜索默认平台
-    'subsonic.publicLeaderboards': false, // 是否在 Subsonic 中公开在线排行榜(只读虚拟播放列表)
-    'subsonic.leaderboardSource': 'tx', // 在线排行榜平台: tx | wy | kg | kw | mg
     'subsonic.lyricTranslation': true, // 是否在 Subsonic 歌词中包含翻译
-    'subsonic.cacheOnPlay': false, // 是否在 Subsonic 播放时触发服务器缓存保存（落盘）
-    'subsonic.playCacheFirst': true, // 是否在 Subsonic 播放时优先使用服务器已有的本地缓存/下载文件直接传输
     'singer.sourcePriority': ['tx', 'wy'], // 歌手信息源优先级
     'artist.maxFetchPages': 20, // 歌手歌曲最大抓取页数
     'cache.namingPattern': 'simple', // 缓存命名规则

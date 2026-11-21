@@ -147,6 +147,11 @@ class App {
         // 快照上传
         document.getElementById('snapshot-upload-input')?.addEventListener('change', (e) => this.handleSnapshotUpload(e));
         document.getElementById('cs-refresh-btn')?.addEventListener('click', () => this.loadCsList());
+        document.getElementById('lib-refresh-btn')?.addEventListener('click', () => this.loadLibrary());
+        document.getElementById('lib-add-btn')?.addEventListener('click', () => this.showLibSourceModal());
+        document.getElementById('lib-save-btn')?.addEventListener('click', () => this.libSaveConfig());
+        document.getElementById('lib-scan-btn')?.addEventListener('click', () => this.libScan());
+        document.getElementById('quota-default-btn')?.addEventListener('click', () => this.quotaDefaultSave());
         document.getElementById('cs-url-btn')?.addEventListener('click', () => this.csAddUrl());
         document.getElementById('cs-upload-btn')?.addEventListener('click', () => document.getElementById('cs-file-input')?.click());
         document.getElementById('cs-file-input')?.addEventListener('change', (e) => this.handleCsUpload(e));
@@ -263,6 +268,7 @@ class App {
                 } catch (e) { console.error('webdav status failed', e); }
                 break;
             case 'sources': this.loadCsList(); break;
+            case 'library': this.loadLibrary(); break;
             case 'snapshots': this.loadSnapshots(); break;
             case 'about': this.loadAbout(); break;
             case 'files': this.loadFiles(this.currentPath || ''); break;
@@ -488,9 +494,14 @@ class App {
 
     async loadUsers() {
         try {
-            const users = await this.request('/api/users');
+            const [users, pub] = await Promise.all([
+                this.request('/api/users'),
+                this.request('/api/admin/public-library').catch(() => null)
+            ]);
             this.users = users.filter(u => u.name !== '_open');
+            this.pending = (pub && pub.data && pub.data.legacy && pub.data.legacy.pendingRequests) || [];
             this.renderUsers();
+            this.renderUserRequests();
         } catch (err) {
             document.getElementById('users-list').innerHTML = '<div class="empty-state">用户列表加载失败，请刷新重试</div>';
             showError('用户列表加载失败');
@@ -506,13 +517,22 @@ class App {
             this.updateUserBatchBtn();
             return;
         }
-        container.innerHTML = this.users.map((user, index) => `
+        container.innerHTML = this.users.map((user, index) => {
+            const q = user.cloudQuota || {};
+            const fmtB = b => b >= 1073741824 ? (b / 1073741824).toFixed(1) + ' GB' : Math.round((b || 0) / 1048576) + ' MB';
+            const granted = !!user.publicLibGranted;
+            const formats = Array.isArray(user.cloudFormats) && user.cloudFormats.length ? user.cloudFormats : [];
+            const cloudSub = `${fmtB(q.usedBytes || 0)} / ${q.quotaMB ? q.quotaMB + ' MB' : '默认'} · ${q.percent || 0}%`;
+            return `
             <div class="trow users-row" data-username="${this.escapeHtml(user.name.toLowerCase())}">
                 <span><input type="checkbox" class="sel user-checkbox" data-index="${index}" aria-label="选择用户 ${this.escapeHtml(user.name)}" onchange="app.updateUserBatchBtn()"></span>
                 <span>
                     <span class="u-name"><span class="ava" style="background:${stringToColor(user.name)}">${this.escapeHtml(user.name.charAt(0).toUpperCase())}</span><b>${this.escapeHtml(user.name)}</b>
+                    <span class="badge ${granted ? 'blue' : ''}" style="margin-left:6px">${granted ? '已授权曲库' : '未授权'}</span>
                     ${user.enableCustomMusicDir ? '<span class="badge blue" style="margin-left:6px">自定义目录</span>' : ''}
-                    <span class="u-sub" style="width:100%;margin-left:40px">${user.password ? '******' : ''}</span></span>
+                    ${user.cloudDisabled ? '<span class="badge" style="margin-left:6px;color:var(--red)">已禁用上传</span>' : ''}
+                    ${formats.length ? `<span class="u-sub" style="margin-left:6px">格式:${formats.join('/')}</span>` : ''}
+                    <span class="u-sub" style="width:100%;margin-left:40px">${cloudSub}${user.password ? ' · 密码 ******' : ''}</span></span>
                 </span>
                 <span class="row-acts" style="justify-content:flex-start">
                     <button class="mini" aria-label="显示或隐藏连接密码" onclick="app.togglePasswordVisibility(${index})"><svg class="mbtn-ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg></button>
@@ -521,11 +541,16 @@ class App {
                 <span class="col-devices"><span class="badge">已创建</span></span>
                 <span style="font-size:11px;color:var(--muted)">${user.enableCustomMusicDir ? this.escapeHtml(user.customMusicDir || '未设置') : '—'}</span>
                 <span class="row-acts">
+                    <button class="mini" onclick="app.userGrant('${this.escapeJs(user.name)}', ${!granted})">${granted ? '取消授权' : '授权曲库'}</button>
+                    <button class="mini" onclick="app.userQuotaEdit('${this.escapeJs(user.name)}')">限额</button>
+                    <button class="mini" onclick="app.userQuotaDisabled('${this.escapeJs(user.name)}', ${!user.cloudDisabled})">${user.cloudDisabled ? '恢复上传' : '禁用上传'}</button>
+                    <button class="mini" onclick="app.userFormats('${this.escapeJs(user.name)}')">格式</button>
+                    <button class="mini danger" onclick="app.userCleanup('${this.escapeJs(user.name)}')">清理</button>
                     <button class="mini" onclick="app.showRenameUserModal(${index})">配置</button>
                     <button class="mini danger" onclick="app.deleteUser(${index})"><svg class="mbtn-ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg> 删除</button>
                 </span>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
         const selectAll = document.getElementById('select-all-users');
         if (selectAll) selectAll.checked = false;
         this.updateUserBatchBtn();
@@ -2132,6 +2157,553 @@ class App {
 
     escapeJs(text) {
         return String(text == null ? '' : text).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/\n/g, '');
+    }
+
+
+    /* ================= 曲库管理:公共曲库 / 曲源 / 授权 / 云配额 ================= */
+    async loadLibrary() {
+        try {
+            const pub = await this.request('/api/admin/public-library');
+            this.lib = { pub: pub.data };
+            this.renderLibConfig();
+            this.renderLibSources();
+            this.renderLibLegacy();
+            this.loadLibSongs();
+        } catch (err) {
+            showError('曲库管理加载失败: ' + err.message);
+        }
+    }
+
+    renderLibConfig() {
+        const d = this.lib.pub;
+        document.getElementById('lib-enabled-switch').classList.toggle('on', !!d.enabled);
+        const name = document.getElementById('lib-name'); if (name && !name.value) name.value = d.name || '';
+        const dir = document.getElementById('lib-dir'); if (dir && !dir.value) dir.value = d.dir || '';
+        const sc = d.scan || {};
+        const synced = sc.syncedAt ? ' · ' + new Date(sc.syncedAt).toLocaleString('zh-CN') : '';
+        document.getElementById('lib-scan-sub').textContent =
+            `扫描: ${sc.songs || 0} 首 · ${sc.albums || 0} 专辑 · ${sc.artists || 0} 歌手${synced}`;
+    }
+
+    libToggleEnabled() { document.getElementById('lib-enabled-switch').classList.toggle('on'); }
+
+    async libSaveConfig() {
+        const body = {
+            enabled: document.getElementById('lib-enabled-switch').classList.contains('on'),
+            name: document.getElementById('lib-name').value.trim(),
+            dir: document.getElementById('lib-dir').value.trim()
+        };
+        try {
+            const r = await this.request('/api/admin/public-library/config', { method: 'POST', body: JSON.stringify(body) });
+            if (!r.success) throw new Error(r.message || '保存失败');
+            showSuccess('公共曲库配置已保存');
+            this.loadLibrary();
+        } catch (e) { showError('保存失败: ' + e.message); }
+    }
+
+    async libScan() {
+        try {
+            const r = await this.request('/api/admin/public-library/scan', { method: 'POST', body: '{}' });
+            if (!r.success) throw new Error(r.message || '扫描失败');
+            showSuccess('扫描作业已触发');
+            setTimeout(() => this.loadLibrary(), 1500);
+        } catch (e) { showError('扫描失败: ' + e.message); }
+    }
+
+    renderLibSources() {
+        const box = document.getElementById('lib-sources');
+        const srcs = this.lib.pub.sources || [];
+        const TYPE = { local: '本地目录', webdav: 'WebDAV', openlist: 'OpenList/Alist' };
+        if (!srcs.length) { box.innerHTML = '<div class="empty-state">暂无曲源，点击右上角「添加曲源」</div>'; return; }
+        box.innerHTML = srcs.map(s => {
+            const status = s.scanning ? '同步中' : (s.status === 'error' ? '出错' : '已同步');
+            const err = s.lastError ? `<div class="u-sub" style="color:var(--red)">${this.escapeHtml(s.lastError)}</div>` : '';
+            return `<div class="trow users-row" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr 2.2fr">
+                <span><b>${this.escapeHtml(s.name)}</b><div class="u-sub">${this.escapeHtml(s.id)}</div>${err}</span>
+                <span>${TYPE[s.type] || s.type}</span>
+                <span>${s.songCount || 0}</span>
+                <span><span class="badge">${status}</span></span>
+                <span style="font-size:11px;color:var(--muted)">${s.syncHours ? s.syncHours + 'h' : '手动'}</span>
+                <span class="row-acts">
+                    <button class="mini" onclick="app.libSourceEdit('${this.escapeJs(s.id)}')">编辑</button>
+                    <button class="mini" onclick="app.libSourceSync('${this.escapeJs(s.id)}')">同步</button>
+                    <button class="mini" onclick="app.libSourceTest('${this.escapeJs(s.id)}')">测试</button>
+                    <button class="mini" onclick="app.libSourceToggle('${this.escapeJs(s.id)}', ${!s.enabled})">${s.enabled ? '停用' : '启用'}</button>
+                    <button class="mini danger" onclick="app.libSourceDelete('${this.escapeJs(s.id)}', '${this.escapeJs(s.name)}')">删除</button>
+                </span></div>`;
+        }).join('');
+    }
+
+    async libSourceSync(id) {
+        try {
+            const r = await this.request('/api/admin/public-library/source/sync', { method: 'POST', body: JSON.stringify({ id }) });
+            if (!r.success) throw new Error(r.message || '同步失败');
+            showSuccess('同步作业已触发');
+            setTimeout(() => this.loadLibrary(), 1200);
+        } catch (e) { showError('同步失败: ' + e.message); }
+    }
+
+    async libSourceTest(id) {
+        try {
+            const r = await this.request('/api/admin/public-library/source/test', { method: 'POST', body: JSON.stringify({ id }) });
+            if (r.success && r.data && r.data.ok) {
+                showSuccess('连接正常' + (r.data.audioCount ? ` · ${r.data.audioCount} 个音频` : ''));
+            } else {
+                throw new Error((r.data && r.data.error) || r.message || '连接失败');
+            }
+        } catch (e) { showError('测试失败: ' + e.message); }
+    }
+
+    async libSourceToggle(id, enabled) {
+        try {
+            const r = await this.request('/api/admin/public-library/source/update', { method: 'POST', body: JSON.stringify({ id, enabled }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            this.loadLibrary();
+        } catch (e) { showError('操作失败: ' + e.message); }
+    }
+
+    async libSourceDelete(id, name) {
+        if (!confirm(`确定删除曲源「${name}」？仅移除索引与配置，不删除远端文件。`)) return;
+        try {
+            const r = await this.request('/api/admin/public-library/source/delete', { method: 'POST', body: JSON.stringify({ id }) });
+            if (!r.success) throw new Error(r.message || '删除失败');
+            showSuccess('曲源已删除');
+            this.loadLibrary();
+        } catch (e) { showError('删除失败: ' + e.message); }
+    }
+
+    showLibSourceModal(src) {
+        this.libEditing = src || null;
+        const cfg = (src && src.config) || {};
+        const TYPE_LABEL = { local: '本地目录', webdav: 'WebDAV', openlist: 'OpenList/Alist' };
+        document.getElementById('modal-title').textContent = src ? '编辑曲源' : '添加曲源';
+        const typeSel = src
+            ? `<select class="inp" id="ls-type" disabled><option value="${src.type}">${TYPE_LABEL[src.type] || src.type}</option></select>`
+            : `<select class="inp" id="ls-type" onchange="app.libSourceFormFields()">
+                <option value="local">本地目录</option><option value="webdav">WebDAV</option><option value="openlist">OpenList/Alist</option>
+            </select>`;
+        document.getElementById('modal-body').innerHTML = `
+            <div class="field"><label>类型</label>${typeSel}</div>
+            <div class="field"><label>名称</label><input class="inp" id="ls-name" placeholder="曲源名称" value="${this.escapeHtml(src ? src.name : '')}"></div>
+            <div id="ls-fields"></div>
+            <div class="field"><label>同步周期(小时,0=手动,上限168)</label><input class="inp" id="ls-hours" type="number" min="0" max="168" value="${src ? (src.syncHours || 0) : 6}"></div>
+            <div class="cfg-btns" style="justify-content:flex-end;margin-top:16px">
+                <button class="pill ghost" onclick="app.closeModal()">取消</button>
+                <button class="pill" onclick="app.libSourceSave()">保存</button>
+            </div>`;
+        this.libSourceFormFields();
+        document.getElementById('modal').classList.remove('hidden');
+    }
+
+    libSourceEdit(id) {
+        const src = (this.lib.pub.sources || []).find(s => s.id === id);
+        if (!src) { showError('曲源不存在'); return; }
+        this.showLibSourceModal(src);
+    }
+
+    libSourceFormFields() {
+        const editing = this.libEditing;
+        const t = editing ? editing.type : document.getElementById('ls-type').value;
+        const cfg = (editing && editing.config) || {};
+        const box = document.getElementById('ls-fields');
+        const mask = editing ? '******' : '';
+        if (t === 'local') {
+            box.innerHTML = `<div class="field"><label>目录路径</label><input class="inp" id="ls-dir" placeholder="/data/music/public" value="${this.escapeHtml(cfg.dir || '')}"></div>`;
+        } else if (t === 'webdav') {
+            box.innerHTML = `
+                <div class="field"><label>服务器地址</label><input class="inp" id="ls-addr" placeholder="http://host:5244/dav" value="${this.escapeHtml(cfg.addr || '')}"></div>
+                <div class="field"><label>用户名</label><input class="inp" id="ls-username" value="${this.escapeHtml(cfg.username || '')}"></div>
+                <div class="field"><label>密码</label><input class="inp" id="ls-password" type="password" placeholder="${editing ? '留空或 ****** 保留原密码' : '密码'}" value="${mask}"></div>
+                <div class="field"><label>根路径</label><input class="inp" id="ls-root" placeholder="/" value="${this.escapeHtml(cfg.rootPath || '')}"></div>`;
+        } else {
+            const paths = Array.isArray(cfg.paths) ? cfg.paths.join(',') : '';
+            box.innerHTML = `
+                <div class="field"><label>地址</label><input class="inp" id="ls-addr" placeholder="http://host:5244" value="${this.escapeHtml(cfg.addr || '')}"></div>
+                <div class="field"><label>Token</label><input class="inp" id="ls-token" placeholder="${editing ? '****** 保留原 Token' : 'Token'}" value="${mask}"></div>
+                <div class="field"><label>目录路径(逗号分隔)</label><div class="cfg-btns"><input class="inp" id="ls-paths" placeholder="/网易云" value="${this.escapeHtml(paths)}" style="flex:1"><button class="mini" type="button" onclick="app.libPickTree()">选择目录</button></div></div>
+                <div id="ls-tree" class="lib-tree"></div>`;
+        }
+    }
+
+    async libPickTree() {
+        const addr = document.getElementById('ls-addr').value.trim();
+        const token = document.getElementById('ls-token').value;
+        const id = this.libEditing ? this.libEditing.id : '';
+        const box = document.getElementById('ls-tree');
+        box.innerHTML = '<div class="u-sub">目录读取中…</div>';
+        try {
+            const r = await this.request('/api/admin/public-library/source/openlist-tree', {
+                method: 'POST', body: JSON.stringify({ addr, token, id, path: '/', depth: 2 })
+            });
+            if (!r.success) throw new Error(r.message || '目录读取失败');
+            const render = (node, depth) => (node.children || []).map(c => `
+                <div class="lib-tree-node" style="padding-left:${depth * 14}px">
+                    <a href="javascript:;" onclick="app.libTreePick('${this.escapeJs(c.path)}')">${this.escapeHtml(c.name || c.path)}</a>
+                    ${render(c, depth + 1)}
+                </div>`).join('');
+            box.innerHTML = render(r.data || {}, 0) || '<div class="u-sub">无子目录</div>';
+        } catch (e) { box.innerHTML = `<div class="u-sub" style="color:var(--red)">${this.escapeHtml(e.message)}</div>`; }
+    }
+
+    libTreePick(path) {
+        const inp = document.getElementById('ls-paths');
+        const cur = (inp.value || '').split(',').map(s => s.trim()).filter(Boolean);
+        if (!cur.includes(path)) cur.push(path);
+        inp.value = cur.join(',');
+    }
+
+    async libSourceSave() {
+        const editing = this.libEditing;
+        const type = editing ? editing.type : document.getElementById('ls-type').value;
+        const name = document.getElementById('ls-name').value.trim();
+        const syncHours = Math.max(0, Math.min(Number(document.getElementById('ls-hours').value) || 0, 168));
+        let config = {};
+        if (type === 'local') {
+            config = { dir: document.getElementById('ls-dir').value.trim() };
+        } else if (type === 'webdav') {
+            config = {
+                addr: document.getElementById('ls-addr').value.trim(),
+                username: document.getElementById('ls-username').value.trim(),
+                password: document.getElementById('ls-password').value,
+                rootPath: document.getElementById('ls-root').value.trim()
+            };
+        } else {
+            config = {
+                addr: document.getElementById('ls-addr').value.trim(),
+                token: document.getElementById('ls-token').value,
+                paths: (document.getElementById('ls-paths').value || '').split(',').map(s => s.trim()).filter(Boolean)
+            };
+        }
+        try {
+            let r;
+            if (editing) {
+                r = await this.request('/api/admin/public-library/source/update', {
+                    method: 'POST', body: JSON.stringify({ id: editing.id, name, config, syncHours })
+                });
+            } else {
+                r = await this.request('/api/admin/public-library/source/create', {
+                    method: 'POST', body: JSON.stringify({ type, name, config, syncHours })
+                });
+            }
+            if (!r.success) throw new Error(r.message || (editing ? '保存失败' : '添加失败'));
+            this.closeModal();
+            showSuccess(editing ? '曲源已更新' : '曲源已添加');
+            this.loadLibrary();
+        } catch (e) { showError((editing ? '保存失败: ' : '添加失败: ') + e.message); }
+    }
+
+    renderLibAccounts() {
+        const box = document.getElementById('lib-accounts');
+        const accs = this.lib.pub.accounts || [];
+        box.innerHTML = accs.map(a => `
+            <div class="trow users-row" style="grid-template-columns:1fr auto">
+                <span><b>${this.escapeHtml(a.name)}</b></span>
+                <span class="row-acts"><div class="cswitch ${a.authorized ? 'on' : ''}" onclick="app.libGrant('${this.escapeJs(a.name)}', ${!a.authorized})"><div class="knob"></div></div></span>
+            </div>`).join('') || '<div class="empty-state">暂无账号</div>';
+        const reqs = (this.lib.pub.legacy && this.lib.pub.legacy.pendingRequests) || [];
+        const rbox = document.getElementById('lib-requests');
+        rbox.innerHTML = reqs.length ? reqs.map(r => `
+            <div class="trow users-row" style="grid-template-columns:1fr auto">
+                <span>${this.escapeHtml(r.user)}<div class="u-sub">来自 ${this.escapeHtml(r.lib)}</div></span>
+                <span class="row-acts">
+                    <button class="mini" onclick="app.libApprove('${this.escapeJs(r.user)}')">批准</button>
+                    <button class="mini danger" onclick="app.libReject('${this.escapeJs(r.user)}')">拒绝</button>
+                </span></div>`).join('') : '<div class="empty-state">无待审批申请</div>';
+    }
+
+    async libGrant(name, granted) {
+        try {
+            const r = await this.request('/api/admin/public-library/authorize', { method: 'POST', body: JSON.stringify({ username: name, granted }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            this.loadLibrary();
+        } catch (e) { showError('授权失败: ' + e.message); }
+    }
+
+    async libApprove(name) {
+        try {
+            const r = await this.request('/api/admin/public-library/approve-request', { method: 'POST', body: JSON.stringify({ username: name }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            showSuccess('已批准并授权');
+            this.loadLibrary();
+        } catch (e) { showError('操作失败: ' + e.message); }
+    }
+
+    async libReject(name) {
+        try {
+            const r = await this.request('/api/admin/public-library/approve-request', { method: 'POST', body: JSON.stringify({ username: name, reject: true }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            this.loadLibrary();
+        } catch (e) { showError('操作失败: ' + e.message); }
+    }
+
+    renderLibUsage() {
+        const q = this.lib.quota;
+        document.getElementById('quota-enabled-switch').classList.toggle('on', q.enableQuota !== false);
+        const def = document.getElementById('quota-default'); if (def && !def.value) def.value = q.defaultQuotaMB || 10240;
+        const users = q.users || [];
+        const fmt = b => b >= 1073741824 ? (b / 1073741824).toFixed(1) + ' GB' : Math.round(b / 1048576) + ' MB';
+        document.getElementById('lib-usage').innerHTML = users.map(u => {
+            const fmtHint = (u.formats && u.formats.length) ? ` · 格式:${u.formats.join('/')}` : '';
+            const disabledBadge = u.disabled ? '<span class="badge" style="margin-left:6px">已禁用上传</span>' : '';
+            return `<div class="trow users-row" style="grid-template-columns:1.6fr 0.8fr auto">
+                <span><b>${this.escapeHtml(u.username)}</b>${disabledBadge}<div class="u-sub">${fmt(u.usedBytes || 0)} / ${u.quotaMB ? u.quotaMB + ' MB' : '默认'}${fmtHint}</div></span>
+                <span style="font-size:11px;color:var(--muted)">${u.percent || 0}%</span>
+                <span class="row-acts">
+                    <button class="mini" onclick="app.quotaEdit('${this.escapeJs(u.username)}')">限额</button>
+                    <button class="mini" onclick="app.quotaToggleDisabled('${this.escapeJs(u.username)}', ${!u.disabled})">${u.disabled ? '恢复上传' : '禁用上传'}</button>
+                    <button class="mini" onclick="app.quotaFormats('${this.escapeJs(u.username)}')">格式</button>
+                    <button class="mini danger" onclick="app.quotaCleanup('${this.escapeJs(u.username)}')">清理</button>
+                </span></div>`;
+        }).join('') || '<div class="empty-state">暂无账号</div>';
+    }
+
+    async quotaToggleEnabled() {
+        const on = document.getElementById('quota-enabled-switch').classList.toggle('on');
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ enableQuota: on }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            showSuccess('配额限制已' + (on ? '启用' : '停用'));
+            this.loadUsers();
+        } catch (e) { showError('操作失败: ' + e.message); }
+    }
+
+    async quotaDefaultSave() {
+        const v = Number(document.getElementById('quota-default').value);
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ defaultQuotaMB: v }) });
+            if (!r.success) throw new Error(r.message || '保存失败');
+            showSuccess('默认配额已保存');
+            this.loadUsers();
+        } catch (e) { showError('保存失败: ' + e.message); }
+    }
+
+    async quotaEdit(name) {
+        const cur = (this.lib.quota.users || []).find(x => x.username === name);
+        const v = prompt(`设置 ${name} 的云曲库配额(MB)，留空或 0 回落默认`, cur && cur.quotaMB ? cur.quotaMB : '');
+        if (v === null) return;
+        const quotaMB = v === '' ? null : Number(v);
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ username: name, quotaMB }) });
+            if (!r.success) throw new Error(r.message || '保存失败');
+            showSuccess('配额已更新');
+            this.loadLibrary();
+        } catch (e) { showError('保存失败: ' + e.message); }
+    }
+
+    async quotaCleanup(name) {
+        if (!confirm(`清理 ${name} 的全部云曲库文件并重置索引？此操作不可恢复。`)) return;
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ username: name, cleanup: true }) });
+            if (!r.success) throw new Error(r.message || '清理失败');
+            showSuccess('云曲库已清理');
+            this.loadLibrary();
+        } catch (e) { showError('清理失败: ' + e.message); }
+    }
+
+    async quotaToggleDisabled(name, disabled) {
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ username: name, disabled }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            showSuccess(disabled ? '已禁用该账号上传(云端只读)' : '已恢复该账号上传');
+            this.loadLibrary();
+        } catch (e) { showError('操作失败: ' + e.message); }
+    }
+
+    async quotaFormats(name) {
+        const cur = (this.lib.quota.users || []).find(x => x.username === name);
+        const curList = (cur && cur.formats) || [];
+        const v = prompt(`限制 ${name} 可上传的音频格式(逗号分隔,留空=不限制)\n例: flac,mp3,wav`, curList.join(','));
+        if (v === null) return;
+        const formats = v.trim() === '' ? null : v.split(',').map(s => s.trim().toLowerCase().replace(/^\./, '')).filter(Boolean);
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ username: name, formats }) });
+            if (!r.success) throw new Error(r.message || '保存失败');
+            showSuccess('上传格式白名单已更新');
+            this.loadLibrary();
+        } catch (e) { showError('保存失败: ' + e.message); }
+    }
+
+    // ── 用户管理:账号维度操作(授权 / 配额 / 禁用 / 格式 / 清理 / 审批) ──
+    renderUserRequests() {
+        const box = document.getElementById('user-requests');
+        const wrap = document.getElementById('user-requests-box');
+        if (!box) return;
+        const reqs = this.pending || [];
+        if (wrap) wrap.classList.toggle('hidden', !reqs.length);
+        box.innerHTML = reqs.length ? reqs.map(r => `
+            <div class="trow users-row" style="grid-template-columns:1fr auto">
+                <span>${this.escapeHtml(r.user)}<div class="u-sub">来自 ${this.escapeHtml(r.lib)}</div></span>
+                <span class="row-acts">
+                    <button class="mini" onclick="app.userApprove('${this.escapeJs(r.user)}')">批准</button>
+                    <button class="mini danger" onclick="app.userReject('${this.escapeJs(r.user)}')">拒绝</button>
+                </span>
+            </div>`).join('') : '<div class="empty-state">无待审批申请</div>';
+    }
+
+    async userGrant(name, granted) {
+        try {
+            const r = await this.request('/api/admin/public-library/authorize', { method: 'POST', body: JSON.stringify({ username: name, granted }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            showSuccess(granted ? `已授予 ${name} 公共曲库授权` : `已解除 ${name} 曲库授权`);
+            this.loadUsers();
+        } catch (e) { showError('授权失败: ' + e.message); }
+    }
+
+    async userApprove(name) {
+        try {
+            const r = await this.request('/api/admin/public-library/approve-request', { method: 'POST', body: JSON.stringify({ username: name }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            showSuccess('已批准并授权');
+            this.loadUsers();
+        } catch (e) { showError('操作失败: ' + e.message); }
+    }
+
+    async userReject(name) {
+        try {
+            const r = await this.request('/api/admin/public-library/approve-request', { method: 'POST', body: JSON.stringify({ username: name, reject: true }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            this.loadUsers();
+        } catch (e) { showError('操作失败: ' + e.message); }
+    }
+
+    async userQuotaEdit(name) {
+        const cur = (this.users || []).find(x => x.name === name);
+        const curMB = cur && cur.cloudQuotaOverrideMB ? cur.cloudQuotaOverrideMB : '';
+        const v = prompt(`设置 ${name} 的云曲库配额(MB)，留空或 0 回落默认`, curMB || '');
+        if (v === null) return;
+        const quotaMB = v === '' ? null : Number(v);
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ username: name, quotaMB }) });
+            if (!r.success) throw new Error(r.message || '保存失败');
+            showSuccess('配额已更新');
+            this.loadUsers();
+        } catch (e) { showError('保存失败: ' + e.message); }
+    }
+
+    async userQuotaDisabled(name, disabled) {
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ username: name, disabled }) });
+            if (!r.success) throw new Error(r.message || '操作失败');
+            showSuccess(disabled ? '已禁用该账号上传(云端只读)' : '已恢复该账号上传');
+            this.loadUsers();
+        } catch (e) { showError('操作失败: ' + e.message); }
+    }
+
+    async userFormats(name) {
+        const cur = (this.users || []).find(x => x.name === name);
+        const curList = Array.isArray(cur && cur.cloudFormats) ? cur.cloudFormats : [];
+        const v = prompt(`限制 ${name} 可上传的音频格式(逗号分隔,留空=不限制)\n例: flac,mp3,wav`, curList.join(','));
+        if (v === null) return;
+        const formats = v.trim() === '' ? null : v.split(',').map(s => s.trim().toLowerCase().replace(/^\./, '')).filter(Boolean);
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ username: name, formats }) });
+            if (!r.success) throw new Error(r.message || '保存失败');
+            showSuccess('上传格式白名单已更新');
+            this.loadUsers();
+        } catch (e) { showError('保存失败: ' + e.message); }
+    }
+
+    async userCleanup(name) {
+        if (!confirm(`清理 ${name} 的全部云曲库文件并重置索引？此操作不可恢复。`)) return;
+        try {
+            const r = await this.request('/api/admin/cloud-quota', { method: 'POST', body: JSON.stringify({ username: name, cleanup: true }) });
+            if (!r.success) throw new Error(r.message || '清理失败');
+            showSuccess('云曲库已清理');
+            this.loadUsers();
+        } catch (e) { showError('清理失败: ' + e.message); }
+    }
+
+    renderLibLegacy() {
+        const box = document.getElementById('lib-legacy');
+        const libs = (this.lib.pub.legacy && this.lib.pub.legacy.libs) || [];
+        box.innerHTML = libs.length ? libs.map(l => `
+            <div class="trow users-row" style="grid-template-columns:1.6fr 1fr auto">
+                <span><b>${this.escapeHtml(l.name)}</b><div class="u-sub">${this.escapeHtml(l.dir || l.id)} · ${l.allowCount} 授权 · ${l.songCountHint || 0} 首</div></span>
+                <span style="font-size:11px;color:var(--muted)">${l.pendingRequests || 0} 待审批</span>
+                <span class="row-acts"><button class="mini" onclick="app.libMigrate('${this.escapeJs(l.id)}')">迁移到公共曲库</button></span>
+            </div>`).join('') : '<div class="empty-state">无旧共享库</div>';
+    }
+
+    async libMigrate(id) {
+        try {
+            const r = await this.request('/api/admin/public-library/migrate', { method: 'POST', body: JSON.stringify({ libId: id }) });
+            if (!r.success) throw new Error(r.message || '迁移失败');
+            showSuccess('旧库已迁移');
+            this.loadLibrary();
+        } catch (e) { showError('迁移失败: ' + e.message); }
+    }
+
+    // ── 公共曲库曲目清单 / 删除 ──
+    async loadLibSongs() {
+        this.libSongQuery = this.libSongQuery || { sourceId: '', keyword: '', page: 1 };
+        const sel = document.getElementById('lib-song-source');
+        if (sel) {
+            const cur = this.libSongQuery.sourceId || sel.value;
+            sel.innerHTML = '<option value="">全部曲源</option>' +
+                (this.lib.pub.sources || []).map(s => `<option value="${this.escapeHtml(s.id)}">${this.escapeHtml(s.name)}</option>`).join('');
+            sel.value = cur;
+        }
+        await this.fetchLibSongs();
+    }
+
+    async fetchLibSongs() {
+        const q = this.libSongQuery;
+        const params = new URLSearchParams({ page: q.page, pageSize: 20 });
+        if (q.sourceId) params.set('sourceId', q.sourceId);
+        if (q.keyword) params.set('keyword', q.keyword);
+        try {
+            const r = await this.request('/api/admin/public-library/songs?' + params.toString());
+            if (!r.success) throw new Error(r.message || '加载失败');
+            this.libSongs = r.data;
+            this.renderLibSongs();
+        } catch (e) { showError('曲目加载失败: ' + e.message); }
+    }
+
+    renderLibSongs() {
+        const d = this.libSongs || { total: 0, items: [], page: 1, pageSize: 20 };
+        const box = document.getElementById('lib-songs');
+        if (!box) return;
+        const fmt = b => b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+        box.innerHTML = d.items.length ? d.items.map(x => `
+            <div class="trow users-row" style="grid-template-columns:2fr 1fr 1fr 1fr auto">
+                <span><b>${this.escapeHtml(x.name)}</b><div class="u-sub">${this.escapeHtml(x.filename)}</div></span>
+                <span>${this.escapeHtml(x.singer || '')}</span>
+                <span>${this.escapeHtml(x.album || '')}</span>
+                <span>${this.escapeHtml(x.sourceName || '')}${x.size ? ` <span class="u-sub">${fmt(x.size)}</span>` : ''}</span>
+                <span class="row-acts"><button class="mini danger" onclick="app.libSongDelete('${this.escapeJs(x.sourceId)}', '${this.escapeJs(x.filename)}')">删除</button></span>
+            </div>`).join('') : '<div class="empty-state">无曲目</div>';
+        const pages = Math.max(1, Math.ceil(d.total / d.pageSize));
+        document.getElementById('lib-songs-sub').textContent = `共 ${d.total} 首`;
+        document.getElementById('lib-songs-page').textContent = `第 ${d.page} / ${pages} 页`;
+    }
+
+    libSongSearch() {
+        const sel = document.getElementById('lib-song-source');
+        const kw = document.getElementById('lib-song-kw');
+        this.libSongQuery.sourceId = sel ? sel.value : '';
+        this.libSongQuery.keyword = kw ? kw.value.trim() : '';
+        this.libSongQuery.page = 1;
+        this.fetchLibSongs();
+    }
+
+    libSongPage(delta) {
+        const d = this.libSongs || { page: 1, total: 0, pageSize: 20 };
+        const pages = Math.max(1, Math.ceil(d.total / d.pageSize));
+        const np = Math.min(pages, Math.max(1, d.page + delta));
+        if (np === d.page) return;
+        this.libSongQuery.page = np;
+        this.fetchLibSongs();
+    }
+
+    async libSongDelete(sourceId, filename) {
+        if (!confirm('确定删除该曲目？本地源会一并删除磁盘文件；远端源仅清除索引，下次同步可能回归。')) return;
+        try {
+            const r = await this.request('/api/admin/public-library/song/delete', { method: 'POST', body: JSON.stringify({ sourceId, filename }) });
+            if (!r.success) throw new Error(r.message || '删除失败');
+            showSuccess('曲目已删除');
+            this.fetchLibSongs();
+            this.loadLibrary();
+        } catch (e) { showError('删除失败: ' + e.message); }
     }
 
     bindWebDAVEvents() {

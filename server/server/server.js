@@ -59,15 +59,15 @@ const userApi_1 = require("./userApi");
 const customSourceHandlers = __importStar(require("./customSourceHandlers"));
 const fileCache = __importStar(require("./fileCache"));
 const customMusicManager = __importStar(require("./customMusicManager"));
-const libraryAgg = __importStar(require("./libraryAgg")); // 我的曲库聚合(0924 一等公民 P1)
-const sharedLib = __importStar(require("./sharedLib")); // 共享媒体库(P2 0924)
-const license = __importStar(require("./licenseCore")); // License 底座(老板 0924 全案)
+const libraryAgg = __importStar(require("./libraryAgg")); // [v3.0 ⑧] 云曲库上传链路:传完即上墙(聚合失效+统计)
+const publicLibrary = __importStar(require("./publicLibrary")); // 公共曲库 v2(feature/public-library):吸收合并旧 sharedLib
 const serverDownloadQueue = __importStar(require("./serverDownloadQueue"));
 const remasterQueue = __importStar(require("./remasterQueue"));
 const downloadQuality_1 = require("./downloadQuality");
 const node_crypto_1 = __importDefault(require("node:crypto"));
 const needle_1 = __importDefault(require("needle"));
 const { MusicTagger, MetaPicture } = require('music-tag-native');
+const createGateway = require("./client-gateway.cjs");
 // ===== Player Session Store =====
 const playerSessions = new Map();
 const SESSION_TTL = 24 * 60 * 60 * 1000; // 24小时
@@ -355,12 +355,15 @@ const NM_MUSIC_AUTH_PATHS = new Set([
     '/api/music/url', '/api/music/quality/size',
     '/api/music/download',
 ]); // [lx166 laoban 0923] 分级:浏览免费(search/tipSearch/歌单/榜单/评论/歌词/热搜 全放开);取链与媒体代理仍需登录(音源=账号服务一部分) // [Gate 2026-09-14] 未登录禁止使用服务器音源(老板指令):musicSdk 全家桶 + 媒体代理
+// [v3.0 ⑧ 账号管理] 上次活跃(内存态:鉴权成功即刷新;重启清零,不做落盘)
+const userLastActive = new Map();
 const verifyUserAuth = (req, tokenOverride) => {
     const token = tokenOverride || req.headers['x-user-token'];
     if (token) {
         // 1. Session Token 验证
         const session = userSessions.get(token);
         if (session && Date.now() - session.createdAt <= USER_SESSION_TTL) {
+            userLastActive.set(session.username, Date.now());
             return session.username;
         }
         // 2. 持久化 API Token 验证（全程走内存，不读磁盘）
@@ -382,6 +385,7 @@ const verifyUserAuth = (req, tokenOverride) => {
                     const ip = (0, tools_1.getIP)(req);
                     const masked = `${meta.token.slice(0, 6)}...${meta.token.slice(-4)}`;
                     log4js_1.tokenLog.info(`API Token [${meta.name}] (${masked}) used by ${persistentUsername} from ${ip} to access ${req.url}`);
+                    userLastActive.set(persistentUsername, Date.now());
                     return persistentUsername;
                 }
                 else {
@@ -405,7 +409,6 @@ const verifyUserAuth = (req, tokenOverride) => {
     return null;
 };
 exports.verifyUserAuth = verifyUserAuth;
-const clientGateway = require('./client-gateway.cjs')(req => (0, exports.verifyUserAuth)(req));
 const getCacheRequestUsername = (req) => {
     const requested = req.headers['x-user-name'] || '';
     if (!requested || requested === 'default' || requested === 'open' || requested === '_open')
@@ -641,14 +644,9 @@ function onSocketError(err) {
     console.error(err);
 }
 const saveUsers = () => {
-    // [R2⚠️ 0924 走查实锤] 双源治理:①users.json 补齐 allowWriteCustomMusicDir(原漏字段→重启丢写权限)
-    // ②同步 saveConfig() 落盘 config.js——双源(config.js/users.json)永远一致,升级/重启不丢用户配置
     const usersJsonPath = node_path_1.default.join(global.lx.dataPath, 'users.json');
     try {
-        // [KAI 20261008 家族案根修①] 原子写：tmp+rename——裸 writeFileSync 的截断窗口被并发加载读到半文件
-        // →JSON.parse 失败→内存回退 config.js 陈旧 users=登录失败/授权消失全家桶（详见 forensics-1008）
-        const tmpPath = usersJsonPath + '.tmp';
-        const payload = JSON.stringify(global.lx.config.users.map(u => ({
+        node_fs_1.default.writeFileSync(usersJsonPath, JSON.stringify(global.lx.config.users.map(u => ({
             name: u.name,
             password: u.password,
             maxSnapshotNum: u.maxSnapshotNum,
@@ -656,12 +654,7 @@ const saveUsers = () => {
             enableCustomMusicDir: u.enableCustomMusicDir,
             customMusicDir: u.customMusicDir,
             allowOperateCustomMusicDir: u.allowOperateCustomMusicDir,
-            allowWriteCustomMusicDir: u.allowWriteCustomMusicDir,
-        })), null, 2);
-        node_fs_1.default.writeFileSync(tmpPath, payload);
-        node_fs_1.default.renameSync(tmpPath, usersJsonPath); // 原子替换:要么旧文件要么新文件,永无半写态
-        if (typeof global.lx.saveConfig === 'function')
-            global.lx.saveConfig(); // users 也在 config.js 里——同步落盘,双源一致
+        })), null, 2));
         return true;
     }
     catch (err) {
@@ -670,8 +663,6 @@ const saveUsers = () => {
     }
 };
 /** [新增] 服务器内部热重载数据 */
-// [KAI 20261008 根修②] 模块级 lastGoodUsers:最近一次成功加载的用户表——users.json 不可读时回填兑底,绝不退回 config.js 陈旧表
-let lastGoodUsers = null;
 const reloadServerData = async () => {
     log4js_1.startupLog.info('Hot-reloading server data (users and config)...');
     // 1. 重新加载 config.js (必须先加载基础配置)
@@ -711,9 +702,6 @@ const reloadServerData = async () => {
             const usersRaw = node_fs_1.default.readFileSync(usersJsonPath, 'utf-8');
             const users = JSON.parse(usersRaw);
             if (Array.isArray(users)) {
-                // [KAI 20261008 家族案根修②] never-regress：成功加载记入 lastGoodUsers；
-                // 失败/非数组时用 lastGoodUsers 回填而非沉默回退 config.js 陈旧 users（登录失败/授权消失的根源）
-                lastGoodUsers = users;
                 global.lx.config.users = users.map(u => ({
                     ...u,
                     dataPath: node_path_1.default.join(global.lx.userPath, (0, user_1.getUserDirname)(u.name))
@@ -729,13 +717,6 @@ const reloadServerData = async () => {
         }
         catch (err) {
             log4js_1.startupLog.error('Failed to reload users.json:', err.message);
-            // [KAI 20261008 根修②] 加载失败：lastGoodUsers 回填，绝不沉默退回 config.js 陈旧表
-            if (lastGoodUsers && Array.isArray(lastGoodUsers) && lastGoodUsers.length) {
-                global.lx.config.users = lastGoodUsers.map(u => ({ ...u, dataPath: node_path_1.default.join(global.lx.userPath, (0, user_1.getUserDirname)(u.name)) }));
-                log4js_1.startupLog.warn(`users.json unreadable — restored ${lastGoodUsers.length} users from lastGoodUsers (regression blocked)`);
-            } else {
-                log4js_1.startupLog.error('users.json unreadable AND no lastGoodUsers — keeping current in-memory users');
-            }
         }
     }
     // 3. 重新初始化 User APIs (解决脚本源实时生效问题)
@@ -1052,6 +1033,7 @@ const serveStatic = (req, res, filePath) => {
     }
 };
 const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Promise((resolve, reject) => {
+    const providerGateway = createGateway((req) => verifyUserAuth(req));
     const httpServer = node_http_1.default.createServer(async (req, res) => {
         // CORS 跨域处理
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1068,6 +1050,9 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         // console.log(req.url)
         const urlObj = new URL(req.url ?? '', `http://${req.headers.host}`);
         const pathname = urlObj.pathname;
+        if (pathname === '/api/user/request' || pathname === '/api/user/media' || pathname.startsWith('/api/user/media/')) {
+            return providerGateway(req, res);
+        }
         // [KAI 20260922] 自托管更新通道:/downloads/* 静态直出(update.json/更新清单/APK)——
         // release 仓已转私有,GitHub raw/Releases 不再匿名可达,客户端「检查更新」主源改为本路由。
         // 永久公开(不走播放器登录门:检查更新可能发生在登录前)。目录=staticPath/downloads/
@@ -1087,10 +1072,18 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         const normalizePath = (p) => (p || '').replace(/\/+$/, '');
         const playerPath = global.lx.config['player.path'] ?? '/';
         const adminPath = global.lx.config['admin.path'] ?? '/admin';
+        // [KAI 20261105 重放 1120] 根路径按 UA 分流:移动端进手机形态,桌面进 HD 形态
+        if (pathname === "/" ) {
+            const ua0 = String(req.headers['user-agent'] || '');
+            res.writeHead(301, { Location: (/Mobile|Android|iPhone/i.test(ua0) && !/iPad/i.test(ua0)) ? "/music-phone/" : "/music/" });
+            res.end(); return;
+        }
         // 映射播放器逻辑 (无论是自定义路径还是前端硬编码的 /music/)
         const isPlayerRequest = (playerPath === '/' || playerPath === '')
             ? (pathname === '/' || (!pathname.startsWith('/api/') && !pathname.startsWith('/rest/') && (adminPath === '' || (pathname !== adminPath && !pathname.startsWith(adminPath + '/')))))
-            : (pathname.startsWith(playerPath + '/') || pathname === playerPath);
+            : (pathname.startsWith(playerPath + '/') || pathname === playerPath
+                // [KAI 20260927] 双形态手机版与 playerPath 解耦:player.path=/music 时 /music-phone 也进播放器分支(此前仅 '/' 生效)
+                || pathname === '/music-phone' || pathname.startsWith('/music-phone/'));
         // [新增] 映射管理后台逻辑
         const isAdminRequest = adminPath && (pathname.startsWith(adminPath + '/') || pathname === adminPath);
         if (isAdminRequest) {
@@ -1111,6 +1104,16 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             if (node_fs_1.default.existsSync(filePath) && node_fs_1.default.statSync(filePath).isFile()) {
                 serveStatic(req, res, filePath);
                 return;
+            }
+        }
+        // [KAI 20261105 重放 1120] 手机 UA 自动进手机形态:形态入口的移动端访问 302 /music-phone/(iPad 不拦)
+        const playerEntry = (playerPath === '/' || playerPath === '') ? '' : playerPath.replace(/\/+$/, '');
+        const isEntryHit = pathname === '/' || pathname === '/index.html' || pathname === '/music/' || pathname === '/music/index.html' || pathname === playerEntry || pathname === playerEntry + '/' || pathname === playerEntry + '/index.html';
+        if (isPlayerRequest && isEntryHit) {
+            const ua = String(req.headers['user-agent'] || '');
+            if (/Mobile|Android|iPhone/i.test(ua) && !/iPad/i.test(ua)) {
+                res.writeHead(302, { 'Location': '/music-phone/' });
+                res.end(); return;
             }
         }
         const isLegacyPlayerAsset = playerPath !== '/music' && (pathname.startsWith('/music/assets/') ||
@@ -1184,8 +1187,10 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 }
                 catch { }
             }
-            const subPath = pathname.slice(normalizedPrefix.length);
-            if (subPath === '/' || subPath === '') {
+            // [KAI 20260927] 双形态手机版与 playerPath 解耦:phone 请求先剥自身前缀,不依赖 normalizedPrefix
+            const isPhonePlayerPath = pathname === '/music-phone' || pathname.startsWith('/music-phone/');
+            const subPath = isPhonePlayerPath ? (pathname.slice('/music-phone'.length) || '/') : pathname.slice(normalizedPrefix.length);
+            if (!isPhonePlayerPath && (subPath === '/' || subPath === '')) {
                 targetPath = 'music/index.html';
             }
             else if (isLoginPage) {
@@ -1193,14 +1198,13 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             }
             else {
                 // [优化] 如果根路径是播放器，且请求已经包含 /music/ 前缀，则不再重复叠加
-                if ((activePrefix === '/' || activePrefix === '') && subPath.startsWith('/music/')) {
-                    targetPath = subPath.slice(1);
-                }
-                else if ((activePrefix === '/' || activePrefix === '') && (subPath === '/music-phone' || subPath.startsWith('/music-phone/'))) {
+                if (isPhonePlayerPath) {
                     // [KAI 20260919] 双形态手机版 web(/music-phone/):独立目录直serve,目录 URL 解析 index.html(修 404);
                     // 走播放器分支=与 HD 同享登录门(原先经通用兜底绕过了门)
-                    const rest = subPath.slice('/music-phone'.length);
-                    targetPath = (rest === '' || rest === '/') ? 'music-phone/index.html' : 'music-phone' + rest;
+                    targetPath = (subPath === '/' || subPath === '') ? 'music-phone/index.html' : 'music-phone' + subPath;
+                }
+                else if ((activePrefix === '/' || activePrefix === '') && subPath.startsWith('/music/')) {
+                    targetPath = subPath.slice(1);
                 }
                 else {
                     targetPath = node_path_1.default.posix.join('music', subPath.startsWith('/') ? subPath.slice(1) : subPath);
@@ -1393,14 +1397,35 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 }
                 if (req.method === 'GET') {
                     // 修改：返回包含密码及自定义目录配置的用户列表
-                    const users = global.lx.config.users.map(u => ({
-                        name: u.name,
-                        password: u.password,
-                        enableCustomMusicDir: u.enableCustomMusicDir ?? false,
-                        customMusicDir: u.customMusicDir || '',
-                        allowOperateCustomMusicDir: u.allowOperateCustomMusicDir ?? false,
-                        allowWriteCustomMusicDir: u.allowWriteCustomMusicDir ?? false,
-                    }));
+                    // [v3.0 ⑧ 账号管理合并] user 对象扩展:公共库授权/云曲库配额/禁用/格式白名单/活跃/留痕(复用 public-library+cloudLibrary 数据拼装)
+                    const pubLibCfg = publicLibrary.readConfig();
+                    const cloudLibCfg = publicLibrary.readCloudConfig();
+                    const users = global.lx.config.users.map((u, i) => {
+                        let createdAt = 0;
+                        try {
+                            if (u.dataPath)
+                                createdAt = Math.round(node_fs_1.default.statSync(u.dataPath).birthtimeMs || 0);
+                        }
+                        catch (_a) { /* 目录缺失=未知 */ }
+                        return {
+                            name: u.name,
+                            password: u.password,
+                            enableCustomMusicDir: u.enableCustomMusicDir ?? false,
+                            customMusicDir: u.customMusicDir || '',
+                            allowOperateCustomMusicDir: u.allowOperateCustomMusicDir ?? false,
+                            allowWriteCustomMusicDir: u.allowWriteCustomMusicDir ?? false,
+                            role: i === 0 ? 'owner' : 'member', // 首个账号=主账号(显示派生,无权限语义)
+                            createdAt,
+                            lastActiveAt: userLastActive.get(u.name) || 0,
+                            publicLibGranted: (Array.isArray(pubLibCfg.authorizedUsers) ? pubLibCfg.authorizedUsers : []).includes(u.name),
+                            cloudQuota: publicLibrary.quotaInfo(u.name),
+                            cloudQuotaOverrideMB: (cloudLibCfg.userQuotaMB && Number(cloudLibCfg.userQuotaMB[u.name]) > 0) ? Number(cloudLibCfg.userQuotaMB[u.name]) : null,
+                            cloudDefaultQuotaMB: cloudLibCfg.defaultQuotaMB || 10240,
+                            cloudDisabled: publicLibrary.isCloudDisabled(u.name),
+                            cloudFormats: publicLibrary.getUserFormats(u.name),
+                            audit: publicLibrary.listUserAudit(u.name, 6),
+                        };
+                    });
                     if (global.lx.config['user.enablePublicFavorites']) {
                         users.unshift({ name: '_open', password: '', enableCustomMusicDir: false, customMusicDir: '', allowOperateCustomMusicDir: false, allowWriteCustomMusicDir: false });
                     }
@@ -1989,7 +2014,6 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 }
                 return;
             }
-            if (pathname === '/api/user/request' || pathname === '/api/user/media' || pathname.startsWith('/api/user/media/')) { void clientGateway(req,res); return; }
             // [新增] User Login Verification
             if (pathname === '/api/user/verify' && req.method === 'POST') {
                 void readBody(req).then(body => {
@@ -3621,34 +3645,9 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 return;
             }
             // ===== [新增] Custom Music APIs (独立于 cache/music) =====
-            // A. 获取自定义目录歌曲列表
-            if (pathname === '/api/music/custom/list' && req.method === 'GET') {
-                const verified = (0, exports.verifyUserAuth)(req);
-                if (!verified) {
-                    res.writeHead(401, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
-                    return;
-                }
-                const userCfg = (0, user_1.getUserConfig)(verified);
-                void customMusicManager.getCustomMusicList(verified).then(list => {
-                    res.writeHead(200, {
-                        'Content-Type': 'application/json',
-                        'Cache-Control': 'no-cache, no-store, must-revalidate',
-                    });
-                    res.end(JSON.stringify({
-                        success: true,
-                        data: list,
-                        allowOperateCustomMusicDir: !!userCfg?.allowOperateCustomMusicDir,
-                        allowWriteCustomMusicDir: !!userCfg?.allowWriteCustomMusicDir
-                    }));
-                }).catch(err => {
-                    res.writeHead(500, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: err.message }));
-                });
-                return;
-            }
-            // C2. 上传到我的曲库(P1b 0924 老板追加:客户端→服务器导入链路)——token 鉴权,multipart 批量,
-            // 落盘用户 customMusicDir 根(音频扩展名白名单+basename 防穿越,重名跳过不覆盖),完成后自动增量扫描+聚合失效,传完即上墙
+            // A0. [v3.0 ⑧] 云曲库上传链路(自 nextmusic-release 移植) + 三重门禁:
+            //   ①云曲库禁用=云端只读,整批拒传(仅个人云曲库);②逐文件格式白名单(账号级收紧,缺省不限制);③逐文件配额预检(逐首判=超限部分成功)
+            // 客户端契约:multipart 字段 files[] + x-user-token 鉴权,响应 {uploaded,skipped,failed,stats,byDirSplit}(传完即上墙)
             if (pathname === '/api/music/custom/upload' && req.method === 'POST') {
                 const verified = (0, exports.verifyUserAuth)(req);
                 if (!verified) {
@@ -3656,24 +3655,40 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
                     return;
                 }
-                const userCfg = (0, user_1.getUserConfig)(verified);
-                // v1.2 spec⑪A:上传目标共享库(?lib=)——owner 切 shared_<id>(权限校验同聚合层)
                 const uploadLib = urlObj.searchParams.get('lib');
+                if (uploadLib === 'public') {
+                    // v3.0 基线:公共曲库=多源聚合(本地目录/WebDAV/OpenList),非上传目标(作废"公共库上传入口")
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '公共曲库为多源聚合库，不支持直接上传' }));
+                    return;
+                }
                 let upOwner = verified;
                 if (uploadLib) {
-                    const r = sharedLib.resolveAccess(uploadLib, verified);
-                    if (!r.ok) { res.writeHead(r.code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: r.reason })); return; }
-                    upOwner = r.ownerKey;
+                    // 旧共享库过渡兼容(403 锁卡/404 语义同流播端点)
+                    const rLib = publicLibrary.resolveContentOwner(uploadLib, verified);
+                    if (!rLib.ok) {
+                        res.writeHead(rLib.code, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(rLib.body));
+                        return;
+                    }
+                    upOwner = rLib.owner;
                 }
+                const userCfg = (0, user_1.getUserConfig)(verified);
                 const customDir = customMusicManager.getCustomMusicDir(upOwner);
                 if (!customDir) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: '未开启或未配置自定义音乐目录(后台·用户管理可开)' }));
+                    res.end(JSON.stringify({ success: false, message: '未开启或未配置自定义音乐目录（后台·账号管理可开）' }));
                     return;
                 }
                 if (!userCfg || userCfg.allowWriteCustomMusicDir !== true) {
                     res.writeHead(403, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: '后台未开启你的曲库写入权限(后台→用户管理→允许写入自定义目录)' }));
+                    res.end(JSON.stringify({ success: false, message: '后台未开启你的曲库写入权限（后台→账号管理→允许写入自定义目录）' }));
+                    return;
+                }
+                // 门禁①[v3.0 ⑧] 云曲库禁用=云端只读,整批拒传(仅个人云曲库;旧共享库不受个人禁用约束)
+                if (upOwner === verified && publicLibrary.isCloudDisabled(verified)) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '云曲库已被管理员禁用（云端只读），禁止上传' }));
                     return;
                 }
                 const contentType = req.headers['content-type'] || '';
@@ -3701,12 +3716,16 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         const ext = node_path_1.default.extname(safeName).toLowerCase();
                         const dest = node_path_1.default.join(customDir, safeName);
                         try {
-                            if (!safeName || !AUDIO_EXT.includes(ext)) {
+                            if (!safeName || !AUDIO_EXT.includes(ext))
                                 failed.push({ name: safeName || '(unnamed)', reason: '非音频文件(' + (ext || '无扩展名') + ')' });
-                            }
-                            else if (node_fs_1.default.existsSync(dest)) {
+                            // 门禁②[v3.0 ⑧] 逐文件格式白名单
+                            else if (upOwner === verified && !publicLibrary.isFormatAllowed(verified, safeName))
+                                failed.push({ name: safeName, reason: '格式不在允许白名单(' + (publicLibrary.getUserFormats(verified) || []).join('/') + ')' });
+                            else if (node_fs_1.default.existsSync(dest))
                                 skipped.push(safeName);
-                            }
+                            // 门禁③逐文件配额预检(部分成功模式:放得下的照传)
+                            else if (upOwner === verified && !(publicLibrary.checkQuota(verified, f.size || 0)).ok)
+                                failed.push({ name: safeName, reason: '云曲库配额不足（剩余空间不够容纳该文件）' });
                             else {
                                 await node_fs_1.default.promises.copyFile(f.filepath, dest);
                                 uploaded.push({ name: safeName, size: f.size || 0 });
@@ -3721,20 +3740,23 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     }
                     // 有新文件则增量扫描+聚合失效:传完即出现在专辑墙
                     let stats = null;
-                    let byDirSplit = null; // v1.1 完成卡拆分:N 首 ID3 完整 / M 首按文件夹分组
+                    let byDirSplit = null;
                     if (uploaded.length) {
                         try {
                             await customMusicManager.syncCustomIndex(upOwner);
                             libraryAgg.invalidate(upOwner);
                             stats = libraryAgg.stats(upOwner);
-                            // 新上传歌曲的分组归属:uploaded 名单按 filename 匹配索引,数 byDir 专辑
+                            // 新上传歌曲分组归属:uploaded 名单按 filename 匹配索引,数 byDir 专辑
                             const idx = customMusicManager.customIndexManager.getAll(upOwner);
-                            const byName = new Set(uploaded.map(u => u.name));
+                            const byName = new Set(uploaded.map(up => up.name));
                             let id3Full = 0, byDir = 0;
                             for (const it of idx) {
-                                if (!byName.has(it.filename.split('/').pop())) continue; // uploaded 是 basename,索引 filename 含相对目录
-                                if (String(it.album || '').trim()) id3Full++;
-                                else byDir++;
+                                if (!byName.has(it.filename.split('/').pop()))
+                                    continue;
+                                if (String(it.album || '').trim())
+                                    id3Full++;
+                                else
+                                    byDir++;
                             }
                             byDirSplit = { id3Full, byDir };
                         }
@@ -3745,7 +3767,33 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 });
                 return;
             }
-            // C. 强制重新同步自定义目录
+            // A. 获取自定义目录歌曲列表
+            if (pathname === '/api/music/custom/list' && req.method === 'GET') {
+                const verified = (0, exports.verifyUserAuth)(req);
+                if (!verified) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                    return;
+                }
+                const userCfg = (0, user_1.getUserConfig)(verified);
+                void customMusicManager.getCustomMusicList(verified).then(list => {
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json',
+                        'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    });
+                    res.end(JSON.stringify({
+                        success: true,
+                        data: list,
+                        allowOperateCustomMusicDir: !!userCfg?.allowOperateCustomMusicDir,
+                        allowWriteCustomMusicDir: !!userCfg?.allowWriteCustomMusicDir
+                    }));
+                }).catch(err => {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: err.message }));
+                });
+                return;
+            }
+            // B. 强制重新同步自定义目录
             if (pathname === '/api/music/custom/sync' && req.method === 'POST') {
                 const verified = (0, exports.verifyUserAuth)(req);
                 if (!verified) {
@@ -3754,7 +3802,6 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     return;
                 }
                 void customMusicManager.syncCustomIndex(verified).then(() => {
-                    libraryAgg.invalidate(verified); // 曲库聚合缓存失效,扫描后立即可见新歌
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: true, message: 'Sync completed' }));
                 }).catch(err => {
@@ -3785,322 +3832,66 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         req.headers['x-user-name'] = reqUsername;
                     }
                     const verified = (0, exports.verifyUserAuth)(req);
+                    // [曲库 v2] lib 路由(流播):public=公共曲库——未授权(含未登录)一律 404"完全看不见"(老板铁律);
+                    // <旧共享库id>=过渡共存(沿用 401/403 锁卡语义供旧客户端);无 lib=用户本人云曲库(原逻辑)
+                    const libParamF = urlObj.searchParams.get('lib');
+                    if (libParamF === 'public') {
+                        if (!publicLibrary.isAuthorized(verified)) {
+                            res.writeHead(404, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, message: 'Not Found' }));
+                            return;
+                        }
+                        // [v2.2 多源] src=<sourceId>:本地源→owner 路由(pubsrc_*/public_lib);WebDAV/OpenList→代理拉流(Range 透传);
+                        // 缺省 src=旧单目录(迁移源同目录,老客户端播放不断)
+                        const srcParamF = urlObj.searchParams.get('src');
+                        if (srcParamF) {
+                            const rsF = publicLibrary.resolveSourceStream(srcParamF);
+                            if (!rsF) {
+                                res.writeHead(404, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ success: false, message: 'Not Found' }));
+                                return;
+                            }
+                            if (rsF.kind === 'local') {
+                                customMusicManager.serveCustomFile(req, res, rawFilename, rsF.owner);
+                            }
+                            else {
+                                void publicLibrary.proxyRemoteStream(req, res, rsF.source, rawFilename).catch(e => {
+                                    if (!res.headersSent) {
+                                        res.writeHead(502, { 'Content-Type': 'application/json' });
+                                        res.end(JSON.stringify({ success: false, message: `远端拉流失败: ${String((e && e.message) || e).slice(0, 200)}` }));
+                                    }
+                                    else
+                                        res.end();
+                                });
+                            }
+                            return;
+                        }
+                        customMusicManager.serveCustomFile(req, res, rawFilename, publicLibrary.PUBLIC_OWNER);
+                        return;
+                    }
+                    if (libParamF) {
+                        if (!verified) {
+                            res.writeHead(401);
+                            res.end('Unauthorized');
+                            return;
+                        }
+                        const rLibF = publicLibrary.resolveContentOwner(libParamF, verified);
+                        if (!rLibF.ok) {
+                            res.writeHead(rLibF.code, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify(rLibF.body || { success: false, message: 'Not Found' }));
+                            return;
+                        }
+                        customMusicManager.serveCustomFile(req, res, rawFilename, rLibF.owner);
+                        return;
+                    }
                     if (!verified) {
                         res.writeHead(401);
                         res.end('Unauthorized');
                         return;
                     }
-                    // P2 共享媒体库:?lib=<id> → 流播路由到共享库目录(权限校验同聚合层)
-                    const libParamF = urlObj.searchParams.get('lib');
-                    let fileOwner = verified;
-                    if (libParamF) {
-                        const r = sharedLib.resolveAccess(libParamF, verified);
-                        if (!r.ok) { res.writeHead(r.code); res.end(r.reason); return; }
-                        fileOwner = r.ownerKey;
-                    }
-                    customMusicManager.serveCustomFile(req, res, rawFilename, fileOwner);
+                    customMusicManager.serveCustomFile(req, res, rawFilename, verified);
                     return;
                 }
-            }
-            // L. License 底座(0924 老板全案:Ed25519/TOFU/两态/永不轮换)
-            if (pathname.startsWith('/api/license/') || pathname.startsWith('/api/admin/license')) {
-                // ── admin:发放/列表/吊销(x-frontend-auth,人工发放链路:爱发电→后台发 key) ──
-                if (pathname.startsWith('/api/admin/license')) {
-                    const auth = req.headers['x-frontend-auth'];
-                    if (auth !== global.lx.config['frontend.password']) {
-                        res.writeHead(401, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
-                        return;
-                    }
-                    const sub = pathname.slice('/api/admin/license'.length);
-                    if (req.method === 'GET' && (sub === '' || sub === '/')) {
-                        res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ success: true, data: license.readAll() }));
-                        return;
-                    }
-                    if (req.method === 'POST' && (sub === '' || sub === '/')) {
-                        void readBody(req).then(body => {
-                            try {
-                                const lic = license.createLicense(JSON.parse(body) || {});
-                                res.writeHead(200, { 'Content-Type': 'application/json' });
-                                res.end(JSON.stringify({ success: true, data: lic }));
-                            }
-                            catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: String(e && e.message || e) })); }
-                        });
-                        return;
-                    }
-                    if (req.method === 'DELETE') {
-                        const key = urlObj.searchParams.get('key');
-                        const ok = key && license.revoke(key);
-                        res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ success: !!ok }));
-                        return;
-                    }
-                    res.writeHead(404); res.end(); return;
-                }
-                // ── 用户侧(x-user-token) ──
-                const verified = (0, exports.verifyUserAuth)(req);
-                if (!verified) {
-                    res.writeHead(401, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
-                    return;
-                }
-                const sub = pathname.slice('/api/license/'.length);
-                // 公钥(TOFU:客户端首次激活锁定)
-                if (sub === 'pubkey' && req.method === 'GET') {
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: true, data: { alg: 'ed25519', pubkey: license.publicKeyB64() } }));
-                    return;
-                }
-                // 激活:绑账号+登记设备+发签名 entitlement
-                if (sub === 'activate' && req.method === 'POST') {
-                    void readBody(req).then(body => {
-                        try {
-                            const { key, installId, deviceName } = JSON.parse(body);
-                            if (!key || !installId) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Missing key/installId' })); return; }
-                            const r = license.activate(String(key).trim(), verified, String(installId), String(deviceName || ''));
-                            if (!r.ok) { res.writeHead(r.code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: r.reason })); return; }
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true, data: r.ent }));
-                        }
-                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Invalid JSON' })); }
-                    });
-                    return;
-                }
-                // 复核(离线宽限期后/定期)
-                if (sub === 'revalidate' && req.method === 'POST') {
-                    void readBody(req).then(body => {
-                        try {
-                            const { key, installId } = JSON.parse(body);
-                            const r = license.revalidate(String(key || ''), verified, String(installId || ''));
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: r.ok, message: r.reason, data: license.byAccount(verified) }));
-                        }
-                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false })); }
-                    });
-                    return;
-                }
-                // 我的 license + 设备管理
-                if (sub === 'me' && req.method === 'GET') {
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: true, data: license.byAccount(verified) }));
-                    return;
-                }
-                if (sub.startsWith('devices/') && req.method === 'DELETE') {
-                    const parts = sub.split('/'); // devices/<key>/<installId>
-                    const ok = parts.length === 3 && license.removeDevice(decodeURIComponent(parts[1]), decodeURIComponent(parts[2]));
-                    res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: !!ok }));
-                    return;
-                }
-                res.writeHead(404, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ success: false, message: 'Unknown license endpoint' }));
-                return;
-            }
-            // F0. 共享媒体库管理(P2 admin,管理员工具——自托管全能力;人数/商用约束在授权层不在代码)
-            if (pathname === '/api/admin/sharedlib' || pathname.startsWith('/api/admin/sharedlib/')) {
-                const auth = req.headers['x-frontend-auth'];
-                if (auth !== global.lx.config['frontend.password']) {
-                    res.writeHead(401, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
-                    return;
-                }
-                const sub = pathname.slice('/api/admin/sharedlib'.length);
-                const isAdminPath = (p) => p === '' || p === '/';
-                // GET 列表
-                if (req.method === 'GET' && isAdminPath(sub)) {
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: true, data: sharedLib.readLibs() }));
-                    return;
-                }
-                // POST 新建
-                if (req.method === 'POST' && isAdminPath(sub)) {
-                    void readBody(req).then(body => {
-                        try {
-                            const lib = JSON.parse(body);
-                            const err = sharedLib.validateLib(lib);
-                            if (err) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: err })); return; }
-                            const libs = sharedLib.readLibs();
-                            if (libs.some(l => l.id === lib.id)) { res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'id 已存在' })); return; }
-                            libs.push({ id: lib.id, name: lib.name || lib.id, dir: lib.dir, access: lib.access || 'allow', allowList: lib.allowList || [], enabled: true });
-                            sharedLib.saveLibs(libs);
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true }));
-                        }
-                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Invalid JSON' })); }
-                    });
-                    return;
-                }
-                // PUT 改(id 在 body)
-                if (req.method === 'PUT' && isAdminPath(sub)) {
-                    void readBody(req).then(body => {
-                        try {
-                            const patch = JSON.parse(body);
-                            if (!patch.id) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Missing id' })); return; }
-                            const libs = sharedLib.readLibs();
-                            const idx = libs.findIndex(l => l.id === patch.id);
-                            if (idx === -1) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Not found' })); return; }
-                            const merged = { ...libs[idx], ...patch, id: libs[idx].id };
-                            const err = sharedLib.validateLib({ ...merged, access: merged.access, allowList: merged.allowList });
-                            if (err) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: err })); return; }
-                            libs[idx] = merged;
-                            sharedLib.saveLibs(libs);
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true }));
-                        }
-                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Invalid JSON' })); }
-                    });
-                    return;
-                }
-                // DELETE ?id=
-                if (req.method === 'DELETE' && isAdminPath(sub)) {
-                    const id = urlObj.searchParams.get('id');
-                    if (!id) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Missing id' })); return; }
-                    const libs = sharedLib.readLibs().filter(l => l.id !== id);
-                    sharedLib.saveLibs(libs);
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: true }));
-                    return;
-                }
-                // POST /:id/approve 审批申请(用户名入白名单,清 request)——admin 节「消息中心」动作
-                const mA = sub.match(/^\/([a-z0-9_-]+)\/approve$/i);
-                if (req.method === 'POST' && mA) {
-                    void readBody(req).then(body => {
-                        try {
-                            const { user } = JSON.parse(body);
-                            const okA = sharedLib.approve(mA[1], String(user || ''));
-                            res.writeHead(okA ? 200 : 404, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: okA }));
-                        }
-                        catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false })); }
-                    });
-                    return;
-                }
-                // POST /:id/sync 扫描(管理员手动;扫描后回填 songCountHint)
-                const m = sub.match(/^\/([a-z0-9_-]+)\/sync$/i);
-                if (req.method === 'POST' && m) {
-                    (async () => {
-                        try {
-                            const libs = sharedLib.readLibs();
-                            const lib = libs.find(l => l.id === m[1]);
-                            if (!lib) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Not found' })); return; }
-                            await customMusicManager.syncCustomIndex('shared_' + lib.id);
-                            libraryAgg.invalidate('shared_' + lib.id);
-                            const st = libraryAgg.stats('shared_' + lib.id);
-                            lib.songCountHint = st.songs;
-                            lib.syncedAt = Date.now();
-                            sharedLib.saveLibs(libs);
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true, data: st }));
-                        }
-                        catch (e) {
-                            res.writeHead(500, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: false, message: String(e && e.message || e) }));
-                        }
-                    })();
-                    return;
-                }
-                res.writeHead(404, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ success: false, message: 'Unknown sharedlib endpoint' }));
-                return;
-            }
-            // F. 「我的曲库」聚合层(老板 0924 一等公民 P1):基于 custom_index 的艺/专/最近/随机——token 鉴权与 custom 系一致
-            // P2:支持 ?lib=<id> 路由到共享媒体库(owner='shared_<id>',权限白名单/公开;锁态 403 携带库信息供锁卡渲染)
-            if (pathname.startsWith('/api/music/library/')) {
-                const verified = (0, exports.verifyUserAuth)(req);
-                if (!verified) {
-                    res.writeHead(401, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
-                    return;
-                }
-                // 库解析:无 lib=私人库(默认);有 lib=共享库(权限校验)
-                const libParam = urlObj.searchParams.get('lib');
-                let owner = verified;
-                let libDenied = null;
-                if (libParam) {
-                    const r = sharedLib.resolveAccess(libParam, verified);
-                    if (!r.ok) {
-                        libDenied = { code: r.code, reason: r.reason, name: (r.lib && r.lib.name) || libParam, songCountHint: (r.lib && r.lib.songCountHint) || 0 };
-                    }
-                    else
-                        owner = r.ownerKey;
-                }
-                if (libDenied) {
-                    // v1.2 spec⑪C:403 带 lock 四字段 {name, reason, owner, songCount}
-                    res.writeHead(libDenied.code, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: libDenied.reason, lock: libDenied.lock || { name: libDenied.name || libParam, reason: libDenied.reason, owner: '管理员', songCount: libDenied.songCountHint || 0 } }));
-                    return;
-                }
-                const sub = pathname.slice('/api/music/library/'.length);
-                const ok = (obj) => {
-                    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store, must-revalidate' });
-                    res.end(JSON.stringify({ success: true, ...obj }));
-                };
-                const num = (k, d) => {
-                    const v = parseInt(urlObj.searchParams.get(k) || '', 10);
-                    return Number.isFinite(v) && v >= 0 ? v : d;
-                };
-                try {
-                    if (sub === 'home' && req.method === 'GET') {
-                        // 质感#3(0924):进屏四路数据一揽子端点——治 req() 全局串行队列下的 524-677ms 空窗(四次往返变一次)
-                        const al = libraryAgg.listAlbums(owner, { type: 'newest', size: 120, offset: 0 });
-                        const ar = libraryAgg.listArtists(owner, { offset: 0, limit: 0 });
-                        const rc = libraryAgg.listSongs(owner, { type: 'recent', size: 60 });
-                        ok({ data: { stats: libraryAgg.stats(owner), albums: al.albums, artists: ar.artists, recent: rc.songs } });
-                        return;
-                    }
-                    if (sub === 'shared/request' && req.method === 'POST') {
-                        void readBody(req).then(body => {
-                            try {
-                                const { id } = JSON.parse(body);
-                                const r = sharedLib.requestAccess(String(id || ''), verified);
-                                res.writeHead(r.ok ? 200 : (r.code || 400), { 'Content-Type': 'application/json' });
-                                res.end(JSON.stringify({ success: r.ok, message: r.ok ? (r.dup ? '已申请过,等待管理员审批' : '已提交申请,管理员将在后台审批') : r.reason }));
-                            }
-                            catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false })); }
-                        });
-                        return;
-                    }
-                    if (sub === 'shared/list' && req.method === 'GET') {
-                        ok({ data: { libs: sharedLib.listForUser(verified) } });
-                        return;
-                    }
-                    if (sub === 'artists' && req.method === 'GET') {
-                        ok({ data: libraryAgg.listArtists(owner, { offset: num('offset', 0), limit: num('limit', 0) }) });
-                        return;
-                    }
-                    if (sub === 'artist' && req.method === 'GET') {
-                        const r = libraryAgg.getArtist(owner, urlObj.searchParams.get('id') || '');
-                        if (!r) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Artist not found' })); return; }
-                        ok({ data: r });
-                        return;
-                    }
-                    if (sub === 'albums' && req.method === 'GET') {
-                        ok({ data: libraryAgg.listAlbums(owner, { type: urlObj.searchParams.get('type') || 'newest', size: num('size', 60), offset: num('offset', 0) }) });
-                        return;
-                    }
-                    if (sub === 'album' && req.method === 'GET') {
-                        const r = libraryAgg.getAlbum(owner, urlObj.searchParams.get('id') || '');
-                        if (!r) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Album not found' })); return; }
-                        ok({ data: r });
-                        return;
-                    }
-                    if (sub === 'songs' && req.method === 'GET') {
-                        ok({ data: libraryAgg.listSongs(owner, { type: urlObj.searchParams.get('type') || 'recent', size: num('size', 30) }) });
-                        return;
-                    }
-                    if (sub === 'stats' && req.method === 'GET') {
-                        ok({ data: libraryAgg.stats(owner) });
-                        return;
-                    }
-                    res.writeHead(404, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: 'Unknown library endpoint' }));
-                }
-                catch (err) {
-                    res.writeHead(500, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: err.message }));
-                }
-                return;
             }
             // D. 获取自定义目录封面
             if (pathname === '/api/music/custom/cover' && req.method === 'GET') {
@@ -4113,7 +3904,17 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     req.headers['x-user-name'] = reqUsername;
                 }
                 const verified = (0, exports.verifyUserAuth)(req);
-                if (!verified) {
+                // [曲库 v2] lib 路由(封面):public=公共曲库——未授权(含未登录)一律 404"完全看不见";
+                // <旧共享库id>=过渡共存(403 锁卡);无 lib=用户本人云曲库(原逻辑,仍需登录)
+                const libParamC = urlObj.searchParams.get('lib');
+                if (libParamC === 'public') {
+                    if (!publicLibrary.isAuthorized(verified)) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: 'Not Found' }));
+                        return;
+                    }
+                }
+                else if (!verified) {
                     res.writeHead(401);
                     res.end('Unauthorized');
                     return;
@@ -4124,13 +3925,31 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     res.end('Missing filename');
                     return;
                 }
-                // P2 共享媒体库:封面同 lib 路由
-                const libParamC = urlObj.searchParams.get('lib');
                 let coverOwner = verified;
-                if (libParamC) {
-                    const r = sharedLib.resolveAccess(libParamC, verified);
-                    if (!r.ok) { res.writeHead(r.code); res.end(r.reason); return; }
-                    coverOwner = r.ownerKey;
+                if (libParamC === 'public') {
+                    // [v2.2 多源] src=<sourceId>:本地源封面→owner 路由;远程源无嵌入封面(不下载远端文件读 ID3,P1)→404 占位
+                    const srcParamC = urlObj.searchParams.get('src');
+                    if (srcParamC) {
+                        const rsC = publicLibrary.resolveSourceStream(srcParamC);
+                        if (!rsC || rsC.kind !== 'local') {
+                            res.writeHead(404);
+                            res.end('Not Found');
+                            return;
+                        }
+                        coverOwner = rsC.owner;
+                    }
+                    else {
+                        coverOwner = publicLibrary.PUBLIC_OWNER;
+                    }
+                }
+                else if (libParamC) {
+                    const rLibC = publicLibrary.resolveContentOwner(libParamC, verified);
+                    if (!rLibC.ok) {
+                        res.writeHead(rLibC.code, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(rLibC.body || { success: false, message: 'Not Found' }));
+                        return;
+                    }
+                    coverOwner = rLibC.owner;
                 }
                 const cover = await customMusicManager.getCustomCover(filename, coverOwner);
                 if (cover && cover.data) {
@@ -4170,7 +3989,6 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         for (const item of rawItems) {
                             const filename = typeof item === 'string' ? item : item?.filename;
                             if (filename && customMusicManager.removeCustomFile(filename, verified)) {
-                                libraryAgg.invalidate(verified); // 删除后聚合缓存同步失效
                                 deletedCount++;
                             }
                         }
@@ -4279,6 +4097,527 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 return;
             }
             // ===== [结束] Custom Music APIs =====
+            // ===== [曲库体系 v2] 公共曲库 Public Library APIs(feature/public-library) =====
+            // 决策基准:NextMusic-design/docs/library-system-v2-decisions.md(老板定稿)+library-system-v2-ui-spec.md(LEO)
+            // 铁律:内容端点门禁=已登录+被授权;未授权(含未登录)一律 404"完全看不见"(非 403 灰置)
+            // 管理端鉴权=x-frontend-auth(后台密码);用户端=x-user-token(verifyUserAuth);契约:docs/library-system-v2-api-contract.md
+            // ---- 管理端:后台公共曲库管理页(目录设置/授权勾选/迁移旧库/待审批) ----
+            if (pathname === '/api/admin/public-library' && req.method === 'GET') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                const pub = publicLibrary.readConfig();
+                const dv = pub.dir ? publicLibrary.validateDir(pub.dir) : null;
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    success: true,
+                    data: {
+                        enabled: pub.enabled, name: pub.name, dir: pub.dir,
+                        dirValid: dv ? { ok: dv.ok, error: dv.error || null, audioCount: dv.audioCount || 0 } : null,
+                        // [v2.2 多源] 曲源列表(曲源管理区数据:类型/状态红点/歌曲数/启停);密文已掩码
+                        sources: publicLibrary.listSources(),
+                        accounts: publicLibrary.listAccounts(),
+                        scan: publicLibrary.scanStatus(),
+                        legacy: { libs: publicLibrary.listLegacy(), pendingRequests: publicLibrary.pendingRequests() },
+                        migratedFrom: pub.migratedFrom,
+                    },
+                }));
+                return;
+            }
+            if (pathname === '/api/admin/public-library/config' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(body => {
+                    try {
+                        const { enabled, name, dir } = JSON.parse(body || '{}');
+                        const pub = publicLibrary.readConfig();
+                        if (dir !== undefined && String(dir) !== pub.dir) {
+                            const v = publicLibrary.validateDir(String(dir || ''));
+                            if (!v.ok)
+                                throw new Error(`目录校验失败: ${v.error}`);
+                            pub.dir = String(dir);
+                            // [v2.2 多源] 旧单目录端点兼容:换目录同步到迁移主本地源(owner=public_lib,源表才是真相源)
+                            const primary = pub.sources.find(s => s.type === 'local' && s.owner === publicLibrary.PUBLIC_OWNER);
+                            if (primary) {
+                                primary.config.dir = pub.dir;
+                                primary.status = 'idle';
+                            }
+                        }
+                        if (name !== undefined)
+                            pub.name = String(name || '公共曲库').slice(0, 32);
+                        if (enabled !== undefined)
+                            pub.enabled = !!enabled;
+                        // [v2.2 多源] 源表才是真相源:无旧 dir 但已有曲源(含远端源)时允许启用;仅"无 dir 且无源"才拒绝
+                        if (pub.enabled && !pub.dir && !(pub.sources || []).length)
+                            throw new Error('启用前需先设置并校验服务器目录（或先添加曲源）');
+                        publicLibrary.saveConfig(pub);
+                        if (pub.enabled && pub.dir) {
+                            void publicLibrary.startScan().catch(e2 => console.error('[publicLibrary] auto scan failed:', e2)); // 换目录/启用后自动重建索引(异步作业,GET 轮询扫描状态)
+                        }
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: { enabled: pub.enabled, name: pub.name, dir: pub.dir, scan: publicLibrary.scanStatus() } }));
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            if (pathname === '/api/admin/public-library/scan' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void publicLibrary.startScan().then(() => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: { scan: publicLibrary.scanStatus() } }));
+                }).catch(e => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: e.message }));
+                });
+                return;
+            }
+            if (pathname === '/api/admin/public-library/authorize' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(body => {
+                    try {
+                        const { username, granted } = JSON.parse(body || '{}');
+                        if (!(global.lx.config.users || []).some(u => u.name === username))
+                            throw new Error('账号不存在');
+                        const authorizedUsers = publicLibrary.grant(String(username), granted !== false);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: { username, authorized: granted !== false, authorizedUsers } }));
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            if (pathname === '/api/admin/public-library/approve-request' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(body => {
+                    try {
+                        const { username, reject } = JSON.parse(body || '{}');
+                        if (!username)
+                            throw new Error('缺少 username');
+                        // [v2.2 管理页] reject=true 拒绝申请(不授予,仅清除旧库 requests)
+                        if (reject) {
+                            publicLibrary.rejectRequest(String(username));
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true, data: { username, rejected: true } }));
+                        }
+                        else {
+                            publicLibrary.approveRequest(String(username));
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true, data: { username, authorized: true } }));
+                        }
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            if (pathname === '/api/admin/public-library/migrate' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(body => publicLibrary.migrateLegacy(String((JSON.parse(body || '{}').libId) || '')))
+                    .then(r => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: r }));
+                }).catch(e => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: e.message }));
+                });
+                return;
+            }
+            // ---- [v2.2 多源] 管理端:曲源管理(源表 CRUD/测试连接/立即同步/启停;授权模型不变=授权曲库整体非逐源) ----
+            if (pathname === '/api/admin/public-library/source/create' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(async (body) => {
+                    try {
+                        const { type, name, config, syncHours } = JSON.parse(body || '{}');
+                        // 远端源创建即真实探活(失败整单拒绝防呆);本地目录同步校验
+                        if (type === 'webdav' || type === 'openlist') {
+                            const t = await publicLibrary.testSource({ type, config });
+                            if (!t.ok)
+                                throw new Error(`连接测试失败: ${t.error}`);
+                        }
+                        const src = publicLibrary.addSource({ type, name, config, syncHours });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: src }));
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            if (pathname === '/api/admin/public-library/source/update' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(async (body) => {
+                    try {
+                        const { id, name, config, enabled, syncHours } = JSON.parse(body || '{}');
+                        if (!id)
+                            throw new Error('缺少 id');
+                        // 远端源连接配置变更→重测连接(目录变更走 validateDir 同在 updateSource 内)
+                        const cur = publicLibrary.getSource(String(id));
+                        if (!cur)
+                            throw new Error('曲源不存在');
+                        if (config && cur.type !== 'local') {
+                            const t = await publicLibrary.testSource({ id: String(id), type: cur.type, config });
+                            if (!t.ok)
+                                throw new Error(`连接测试失败: ${t.error}`);
+                        }
+                        const src = publicLibrary.updateSource(String(id), { name, config, enabled, syncHours });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: src }));
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            if (pathname === '/api/admin/public-library/source/delete' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(body => {
+                    try {
+                        const { id } = JSON.parse(body || '{}');
+                        if (!id)
+                            throw new Error('缺少 id');
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: publicLibrary.deleteSource(String(id)) }));
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            if (pathname === '/api/admin/public-library/source/test' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(async (body) => {
+                    try {
+                        const { id, type, config } = JSON.parse(body || '{}');
+                        // 表单测试:{type,config}(密文字段回传掩码=沿用存量,需常 id);存量源体检:{id}
+                        const r = await publicLibrary.testSource({ id: id ? String(id) : undefined, type, config });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: r }));
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            if (pathname === '/api/admin/public-library/source/sync' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(body => {
+                    try {
+                        const { id } = JSON.parse(body || '{}');
+                        if (!id)
+                            throw new Error('缺少 id');
+                        void publicLibrary.syncSource(String(id)).catch(() => { }); // 后台作业化,立即回状态(轮询 1.1 sources[].scanning)
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: publicLibrary.getSource(String(id)) }));
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            if (pathname === '/api/admin/public-library/source/openlist-tree' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(async (body) => {
+                    try {
+                        const { addr, token, path, depth, id } = JSON.parse(body || '{}');
+                        // [v2.2 管理页] 编辑模式:token 掩码/留空时可用 id 沿用存量源密文(同 source/test 掩码规则)
+                        let effAddr = addr, effToken = token;
+                        if (id && (!token || token === publicLibrary.SECRET_MASK)) {
+                            const src = publicLibrary.getSource(String(id));
+                            if (src && src.type === 'openlist') {
+                                if (!effAddr || effAddr === publicLibrary.SECRET_MASK) effAddr = src.config.addr;
+                                effToken = src.config.token;
+                            }
+                        }
+                        if (!effAddr || !effToken)
+                            throw new Error('缺少 addr/token');
+                        const tree = await require('./sourceConnectors').openlistTree({ addr: effAddr, token: effToken }, path || '/', Math.min(parseInt(depth) || 2, 4));
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: tree }));
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            // ---- 管理端:公共曲库歌曲级清单(按曲源/关键词检索,分页) ----
+            if (pathname === '/api/admin/public-library/songs' && req.method === 'GET') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                const q = new URL(req.url ?? '', `http://${req.headers.host}`).searchParams;
+                try {
+                    const data = publicLibrary.adminListSongs({
+                        sourceId: q.get('sourceId') || '',
+                        keyword: q.get('keyword') || '',
+                        page: q.get('page'),
+                        pageSize: q.get('pageSize'),
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data }));
+                } catch (e) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: e.message }));
+                }
+                return;
+            }
+            // ---- 管理端:公共曲库曲目删除(本地源删文件+索引;远端源仅清索引) ----
+            if (pathname === '/api/admin/public-library/song/delete' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(async (body) => {
+                    try {
+                        const { sourceId, filename } = JSON.parse(body || '{}');
+                        const data = publicLibrary.adminRemoveSong({ sourceId, filename });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data }));
+                    } catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            // ---- 管理端:云曲库配额(后台用量展示/逐账号限额,钩子对齐 cacheSizeLimit 模式) ----
+            if (pathname === '/api/admin/cloud-quota' && req.method === 'GET') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                const cloud = publicLibrary.readCloudConfig();
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, data: { enableQuota: cloud.enableQuota !== false, defaultQuotaMB: cloud.defaultQuotaMB || 10240, users: publicLibrary.listUserUsage() } }));
+                return;
+            }
+            if (pathname === '/api/admin/cloud-quota' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(body => {
+                    try {
+                        const { username, quotaMB, defaultQuotaMB, enableQuota, cleanup, disabled, formats } = JSON.parse(body || '{}');
+                        let data = null;
+                        if (enableQuota !== undefined)
+                            data = publicLibrary.setQuotaEnabled(enableQuota);
+                        if (defaultQuotaMB !== undefined)
+                            data = publicLibrary.setDefaultQuota(defaultQuotaMB);
+                        if (username !== undefined) {
+                            if (!(global.lx.config.users || []).some(u => u.name === username))
+                                throw new Error('账号不存在');
+                            // [v2.2 管理页] cleanup=true 清理云曲库(删除个人 custom_music 目录全部内容+重置索引)
+                            if (cleanup)
+                                data = publicLibrary.cleanupUserCloud(String(username));
+                            // [v3.0 ⑧ 账号管理] 禁用云曲库(云端只读·上传拒传) / 上传格式白名单(逐账号收紧,缺省不限制)
+                            else if (disabled !== undefined)
+                                data = publicLibrary.setUserCloudDisabled(String(username), !!disabled);
+                            else if (formats !== undefined)
+                                data = publicLibrary.setUserFormats(String(username), formats);
+                            else
+                                data = publicLibrary.setUserQuota(String(username), quotaMB); // quotaMB=null/省略=清除覆盖回落默认
+                        }
+                        if (!data)
+                            throw new Error('缺少可操作字段(username/cleanup/defaultQuotaMB/enableQuota)');
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data }));
+                    }
+                    catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            // ---- 内容端点:门禁=已登录+被授权;未授权(含未登录/曲库未启用)一律 404(完全看不见铁律) ----
+            if (pathname.startsWith('/api/public-library/')) {
+                const verifiedPL = (0, exports.verifyUserAuth)(req);
+                if (!publicLibrary.isAuthorized(verifiedPL)) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Not Found' }));
+                    return;
+                }
+                if (pathname === '/api/public-library/summary' && req.method === 'GET') {
+                    const pub = publicLibrary.readConfig();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    // [v2.2 多源] 附启用的源清单(前端副行源名标注/源状态;error 源在前端隐藏)
+                    res.end(JSON.stringify({ success: true, data: { name: pub.name, scan: publicLibrary.scanStatus(), sources: publicLibrary.listSources().filter(s => s.enabled) } }));
+                    return;
+                }
+                if (pathname === '/api/public-library/stats' && req.method === 'GET') {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: publicLibrary.stats() }));
+                    return;
+                }
+                if (pathname === '/api/public-library/albums' && req.method === 'GET') {
+                    const type = urlObj.searchParams.get('type') || 'newest';
+                    const size = Math.min(parseInt(urlObj.searchParams.get('size')) || 50, 200); // [v2.2] 默认 50/页(spec ④;cap 200)
+                    const offset = Math.max(0, parseInt(urlObj.searchParams.get('offset')) || 0);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: publicLibrary.listAlbums({ type, size, offset }) }));
+                    return;
+                }
+                if (pathname === '/api/public-library/album' && req.method === 'GET') {
+                    const id = urlObj.searchParams.get('id') || '';
+                    const r = publicLibrary.getAlbum(id);
+                    if (!r) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: 'Not Found' }));
+                    }
+                    else {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: r }));
+                    }
+                    return;
+                }
+                if (pathname === '/api/public-library/artists' && req.method === 'GET') {
+                    const offset = Math.max(0, parseInt(urlObj.searchParams.get('offset')) || 0);
+                    const limitRaw = urlObj.searchParams.get('limit');
+                    const limit = limitRaw === '0' ? 0 : Math.min(parseInt(limitRaw) || 50, 500); // [v2.2] 默认 50/页(spec ④);显式 limit=0=不分页全量;cap 500
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: publicLibrary.listArtists({ offset, limit }) }));
+                    return;
+                }
+                if (pathname === '/api/public-library/artist' && req.method === 'GET') {
+                    const id = urlObj.searchParams.get('id') || '';
+                    const r = publicLibrary.getArtist(id);
+                    if (!r) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: 'Not Found' }));
+                    }
+                    else {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: r }));
+                    }
+                    return;
+                }
+                if (pathname === '/api/public-library/songs' && req.method === 'GET') {
+                    const type = urlObj.searchParams.get('type') || 'recent';
+                    const size = Math.min(parseInt(urlObj.searchParams.get('size')) || 100, 200); // [v2.2] 默认 100/页(spec ④;cap 200)
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: publicLibrary.listSongs({ type, size }) }));
+                    return;
+                }
+                // 账号设置"显示公共曲库"个人开关(仅授权账号可见该行——未授权在上方门禁已 404)
+                if (pathname === '/api/public-library/prefs' && req.method === 'GET') {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data: publicLibrary.getUserPrefs(verifiedPL) }));
+                    return;
+                }
+                if (pathname === '/api/public-library/prefs' && req.method === 'POST') {
+                    void readBody(req).then(body => {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: publicLibrary.setUserPrefs(verifiedPL, JSON.parse(body || '{}')) }));
+                    }).catch(e => {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    });
+                    return;
+                }
+                // 家族内未匹配路径同 404(对未授权者路径枚举无差别)
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Not Found' }));
+                return;
+            }
+            // ---- 用户端:云曲库个人配额用量(登录即可见——云曲库是账号自有空间,不依赖公共曲库授权) ----
+            if (pathname === '/api/cloud-library/quota' && req.method === 'GET') {
+                const verifiedQ = (0, exports.verifyUserAuth)(req);
+                if (!verifiedQ) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                    return;
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, data: publicLibrary.quotaInfo(verifiedQ) }));
+                return;
+            }
             // [New] Batch Move Files between folders
             if (pathname === '/api/music/cache/move' && req.method === 'POST') {
                 const reqUsername = req.headers['x-user-name'] || '';
@@ -5966,63 +6305,6 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             // [lx171 老板 0923 03:30] 匿名脚本获取:web 端按 URL 添加音源时浏览器跨域被拦(Failed to fetch),
             // 由服务器代拉。仅放行 http(s) + 响应体走脚本元数据校验;失败原样带回状态码。
             // 风险面=SSRF:限 5MB、只 GET、不跟随凭据;匿名可用(自定义音源不依赖服务器账号,拉脚本只是下载文本)。
-            // [lx176 老板 0923 07:42] web 沙箱 HTTP 代理:网页端自定义音源脚本的上游调用被浏览器 CORS 拦,
-            // 沙箱 httpReq 桥在 web 形态改走本端点由服务器代发(原生/Electron 不走此路)。
-            // 风险面=SSRF 开放代理:①仅 GET/POST ②限 text 响应 5MB/二进制 8MB ③仅接受 application/json 请求体
-            // ④匿名放行(自定义音源不依赖账号)但可被扫描滥用——挂限速:每 IP 每分钟 120 次(内存桶)。
-            if (pathname === '/api/sandbox/http' && req.method === 'POST') {
-                const rlMap = (globalThis.__sbRl = globalThis.__sbRl || new Map());
-                const ipK = (0, tools_1.getIP)(req);
-                const nowMin = Math.floor(Date.now() / 60000);
-                const rl = rlMap.get(ipK) || { min: nowMin, n: 0 };
-                if (rl.min !== nowMin) { rl.min = nowMin; rl.n = 0; }
-                rl.n++;
-                rlMap.set(ipK, rl);
-                if (rl.n > 120) {
-                    res.writeHead(429, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ err: 'rate limited' }));
-                    return;
-                }
-                void readBody(req).then(body => {
-                    const { url: sUrl, method, headers, body: reqBody } = JSON.parse(body);
-                    if (!sUrl || !(/^https?:\/\//i).test(sUrl)) throw new Error('bad url');
-                    const up = new URL(sUrl);
-                    const lib = up.protocol === 'https:' ? require('https') : require('http');
-                    const h = {};
-                    // 只透传安全头子集( UA/CT/Accept/鉴权类 )
-                    for (const hk of ['User-Agent', 'Content-Type', 'Accept', 'Authorization', 'X-API-Key', 'Cookie', 'Referer']) {
-                        if (headers && headers[hk]) h[hk] = headers[hk];
-                    }
-                    const chunks = [];
-                    let size = 0, doneFlag = false;
-                    const finish = (code, ctype, payload, extraErr) => {
-                        if (doneFlag) return; doneFlag = true;
-                        res.writeHead(code, { 'Content-Type': ctype });
-                        res.end(payload != null ? JSON.stringify({ statusCode: code, bodyText: typeof payload === 'string' ? payload : null, bodyB64: payload, err: extraErr || null, headers: {} }) : JSON.stringify({ err: extraErr || 'fail' }));
-                    };
-                    const rq = lib.request(up, { method: (method || 'GET').toUpperCase() === 'GET' ? 'GET' : 'POST', headers: h, timeout: 15000 }, crs => {
-                        if (crs.statusCode >= 300 && crs.statusCode < 400 && crs.headers.location) {
-                            finish(crs.statusCode, 'application/json', null, 'redirect:' + new URL(crs.headers.location, up).toString());
-                            return;
-                        }
-                        const isBin = !( /text|json|javascript|xml/i.test(crs.headers['content-type'] || '') );
-                        crs.on('data', c => { size += c.length; const cap = isBin ? 8 : 5; if (size > cap * 1024 * 1024) { rq.destroy(); finish(413, 'application/json', null, 'too large'); } else chunks.push(c); });
-                        crs.on('end', () => {
-                            const buf = Buffer.concat(chunks);
-                            if (isBin) finish(crs.statusCode || 0, 'application/json', buf.toString('base64'));
-                            else finish(crs.statusCode || 0, 'application/json', buf.toString('utf-8'));
-                        });
-                        crs.on('error', e5 => finish(0, 'application/json', null, String(e5.message || e5)));
-                    });
-                    rq.on('timeout', () => { rq.destroy(); finish(504, 'application/json', null, 'timeout'); });
-                    rq.on('error', e6 => finish(0, 'application/json', null, String(e6.message || e6)));
-                    if (reqBody) rq.write(String(reqBody));
-                    rq.end();
-                }).catch(e7 => {
-                    if (!res.headersSent) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ err: String((e7 && e7.message) || e7) })); }
-                });
-                return;
-            }
             if (pathname === '/api/custom-source/fetch-script' && req.method === 'GET') {
                 const sUrl = urlObj.searchParams.get('url');
                 if (!sUrl || !/^https?:\/\//i.test(sUrl)) {
@@ -6417,6 +6699,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         'user.enableLoginCacheRestriction': global.lx.config['user.enableLoginCacheRestriction'],
                         'user.enableCacheSizeLimit': global.lx.config['user.enableCacheSizeLimit'],
                         'user.cacheSizeLimit': global.lx.config['user.cacheSizeLimit'],
+                        'cloudLibrary.enableQuota': (global.lx.config.cloudLibrary || {}).enableQuota !== false,
+                        'cloudLibrary.defaultQuotaMB': (global.lx.config.cloudLibrary || {}).defaultQuotaMB || 10240,
                         'frontend.password': global.lx.config['frontend.password'],
                         'player.enableAuth': global.lx.config['player.enableAuth'] || false,
                         'player.password': global.lx.config['player.password'] || '',
@@ -6491,6 +6775,11 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                                 global.lx.config['user.enableCacheSizeLimit'] = newConfig['user.enableCacheSizeLimit'];
                             if (newConfig['user.cacheSizeLimit'] !== undefined)
                                 global.lx.config['user.cacheSizeLimit'] = parseInt(newConfig['user.cacheSizeLimit']) || 2000;
+                            // [曲库 v2] 云曲库配额(走 publicLibrary 单一写通道,立即持久化)
+                            if (newConfig['cloudLibrary.enableQuota'] !== undefined)
+                                publicLibrary.setQuotaEnabled(newConfig['cloudLibrary.enableQuota']);
+                            if (newConfig['cloudLibrary.defaultQuotaMB'] !== undefined)
+                                publicLibrary.setDefaultQuota(newConfig['cloudLibrary.defaultQuotaMB']);
                             if (newConfig['system.allowUnsafeVM'] !== undefined)
                                 global.lx.config['system.allowUnsafeVM'] = newConfig['system.allowUnsafeVM'];
                             let warning = '';

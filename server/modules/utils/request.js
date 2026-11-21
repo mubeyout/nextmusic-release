@@ -104,7 +104,6 @@ const request = (url, options, callback) => {
         options.json = false;
     }
     options.response_timeout = options.timeout;
-    options.read_timeout = options.timeout;
     return needle_1.default.request(options.method || 'get', url, data, options, (err, resp, body) => {
         if (!err) {
             body = resp.body = resp.raw.toString();

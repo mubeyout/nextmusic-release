@@ -121,6 +121,11 @@ class WebDAVSync extends events_1.EventEmitter {
             }
         };
         scanDir(this.dataPath);
+        // [新增] 扫描根目录下的 config.js
+        const rootConfigPath = path_1.default.join(process.cwd(), 'config.js');
+        if (fs_1.default.existsSync(rootConfigPath)) {
+            files.set('config.js', this.getFileHash(rootConfigPath));
+        }
         return files;
     }
     async getChangedFiles() {
@@ -197,7 +202,8 @@ class WebDAVSync extends events_1.EventEmitter {
         if (!this.client)
             return false;
         try {
-            const localPath = path_1.default.join(this.dataPath, relativePath);
+            const isRootConfig = relativePath === 'config.js';
+            const localPath = isRootConfig ? path_1.default.join(process.cwd(), 'config.js') : path_1.default.join(this.dataPath, relativePath);
             if (!fs_1.default.existsSync(localPath))
                 return false;
             const stat = fs_1.default.statSync(localPath);
@@ -266,7 +272,8 @@ class WebDAVSync extends events_1.EventEmitter {
             return false;
         try {
             const remotePath = `${this.syncPath}/${relativePath.replace(/\\/g, '/')}`;
-            const localPath = path_1.default.join(this.dataPath, relativePath);
+            const isRootConfig = relativePath === 'config.js';
+            const localPath = isRootConfig ? path_1.default.join(process.cwd(), 'config.js') : path_1.default.join(this.dataPath, relativePath);
             // 确保本地目录存在
             const localDir = path_1.default.dirname(localPath);
             if (!fs_1.default.existsSync(localDir)) {
@@ -284,8 +291,9 @@ class WebDAVSync extends events_1.EventEmitter {
                 }
             }
             fs_1.default.writeFileSync(localPath, content);
-            if (relativePath === 'config.js') {
-                console.log('config.js restored from WebDAV, content updated in data directory.');
+            if (isRootConfig) {
+                console.log('config.js restored from WebDAV, content changed.');
+                // 这里可以发出事件提醒主进程，不过由于用户是手动触发恢复或启动时恢复，已经有重启逻辑覆盖
             }
             this.addLog({
                 timestamp: Date.now(),
@@ -333,6 +341,11 @@ class WebDAVSync extends events_1.EventEmitter {
                     cwd: this.dataPath,
                     ignore: ['temp-*.zip', '*.log', 'lx-sync-backup-*.zip'],
                 });
+                // [新增] 将根目录下的 config.js 也打包进去
+                const rootConfigPath = path_1.default.join(process.cwd(), 'config.js');
+                if (fs_1.default.existsSync(rootConfigPath)) {
+                    archive.file(rootConfigPath, { name: 'config.js' });
+                }
                 archive.finalize();
             });
             return zipName;
@@ -566,6 +579,18 @@ class WebDAVSync extends events_1.EventEmitter {
                 .on('close', () => resolve())
                 .on('error', (err) => reject(err));
         });
+        const extractedConfig = path_1.default.join(targetPath, 'config.js');
+        const rootConfig = path_1.default.join(process.cwd(), 'config.js');
+        if (fs_1.default.existsSync(extractedConfig) && path_1.default.resolve(extractedConfig) !== path_1.default.resolve(rootConfig)) {
+            console.log(`[Restore] Moving extracted config.js from ${extractedConfig} to ${rootConfig}`);
+            try {
+                fs_1.default.copyFileSync(extractedConfig, rootConfig);
+                fs_1.default.unlinkSync(extractedConfig);
+            }
+            catch (err) {
+                console.error('[Restore] Failed to move config.js to root:', err.message);
+            }
+        }
     }
     async syncChangedFiles() {
         const { changed, deleted } = await this.getChangedFiles();
@@ -658,10 +683,10 @@ class WebDAVSync extends events_1.EventEmitter {
             this.emit('progress', { type: 'restore', status: 'start', message: '正在从云端下载备份...' });
             const result = await this.downloadLatestBackup();
             if (result) {
-                // 检查解压后数据目录是否确实有了 config.js
-                const targetConfigPath = global.lx?.configPath || path_1.default.join(this.dataPath, 'config.js');
-                if (!fs_1.default.existsSync(targetConfigPath)) {
-                    console.log('Backup restored but config.js is missing in data dir, saving current config and uploading...');
+                // 检查解压后根目录是否确实有了 config.js
+                const rootConfigPath = path_1.default.join(process.cwd(), 'config.js');
+                if (!fs_1.default.existsSync(rootConfigPath)) {
+                    console.log('Backup restored but config.js is missing, saving current config and uploading...');
                     if (global.lx && global.lx.saveConfig) {
                         global.lx.saveConfig();
                     }

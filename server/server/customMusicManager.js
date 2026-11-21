@@ -52,8 +52,38 @@ const fileCache = __importStar(require("./fileCache"));
 const getCustomMusicDir = (username) => {
     if (!username || username === '_open' || username === 'default')
         return null;
-    // [P2 共享媒体库 0924] owner 泛化:'shared_<libId>' 前缀路由到共享库目录(config.sharedLibraries)——
+    // [曲库体系 v2] owner 泛化:'public_lib'=公共曲库目录(config.publicLibrary);
+    // 'shared_<libId>'=旧共享库目录(config.sharedLibraries,吸收合并过渡期共存)——
     // 扫描/索引/聚合/流播全链自动兼容(都走本函数);权限校验在路由层独立做,这里只解析目录
+    if (username === 'public_lib') {
+        try {
+            const pub = global.lx.config.publicLibrary;
+            if (pub && pub.enabled && pub.dir) {
+                const resolved = path_1.default.resolve(pub.dir);
+                if (fs_1.default.existsSync(resolved))
+                    return resolved;
+            }
+        }
+        catch (e) { /* 配置异常当无目录 */ }
+        return null;
+    }
+    if (String(username).startsWith('pubsrc_')) {
+        // [曲库 v2.2 多源] 'pubsrc_<sourceId>'=公共曲库的本地目录源(config.publicLibrary.sources);
+        // 目录解析同 public_lib(存在才返回),扫描/流播/封面全链自动复用
+        try {
+            const srcId = String(username).slice('pubsrc_'.length);
+            const pub = global.lx.config.publicLibrary;
+            const src = (pub && Array.isArray(pub.sources) ? pub.sources : [])
+                .find(s => s && s.id === srcId && s.type === 'local' && s.enabled !== false);
+            if (src && src.config && src.config.dir) {
+                const resolved = path_1.default.resolve(src.config.dir);
+                if (fs_1.default.existsSync(resolved))
+                    return resolved;
+            }
+        }
+        catch (e) { /* 配置异常当无目录 */ }
+        return null;
+    }
     if (String(username).startsWith('shared_')) {
         try {
             const libId = String(username).slice('shared_'.length);

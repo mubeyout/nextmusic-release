@@ -25,14 +25,23 @@ function albumKeyOf(item) {
     return { key: "dir:" + dir.toLowerCase(), name: dir.split("/").pop() || dir, byDir: true };
 }
 
-// ── 聚合构建(每用户,30s 内存缓存,防连点重复分组) ──
-const aggCache = new Map(); // username -> { at, artists:Map, albums:Map }
+// ── 聚合构建(每键 30s 内存缓存,防连点重复分组) ──
+// [v2.2 多源] 键不再限定"用户名":registerItems(key, provider) 注册外部条目供给器后,
+// 同一组聚合 API 可聚合任意来源(公共曲库多源合并视图=本地各源 custom_index + 远程源索引);
+// 未注册的键沿用 customIndexManager(用户云曲库/我的曲库原路径不变)
+const aggCache = new Map(); // key -> { at, artists:Map, albums:Map, items }
+const itemProviders = new Map(); // key -> () => items[](注册键的外部条目供给器)
 const AGG_TTL = 30 * 1000;
+function registerItems(key, provider) {
+    if (typeof provider === 'function') itemProviders.set(key, provider);
+    else itemProviders.delete(key);
+}
 
-function buildAgg(username) {
-    const cached = aggCache.get(username);
+function buildAgg(key) {
+    const cached = aggCache.get(key);
     if (cached && Date.now() - cached.at < AGG_TTL) return cached;
-    const items = customIndexManager.getAll(username); // 已按 mtime 无序,排序在出口做
+    const provider = itemProviders.get(key);
+    const items = provider ? provider() : customIndexManager.getAll(key); // 已按 mtime 无序,排序在出口做
     const artists = new Map(); // key -> {id,name,songCount,coverFile,albums:Set,latestMtime}
     const albums = new Map();  // key -> {id,name,artistNames:Set,songCount,coverFile,latestMtime,subPath,byDir}
     for (const it of items) {
@@ -60,10 +69,10 @@ function buildAgg(username) {
         if (!ar.coverFile && it.hasCover) ar.coverFile = it.filename;
     }
     const result = { at: Date.now(), artists, albums, items };
-    aggCache.set(username, result);
+    aggCache.set(key, result);
     return result;
 }
-// 索引变动后调用(扫描/删除/洗版后),清缓存保持新鲜
+// 索引变动后调用(扫描/删除/洗版/多源增删后),清缓存保持新鲜
 function invalidate(username) {
     if (username) aggCache.delete(username);
     else aggCache.clear();
@@ -76,6 +85,8 @@ const songOut = (it) => ({
     filename: it.filename, subPath: it.subPath || "",
     ext: it.ext || "", hasCover: !!it.hasCover, hasLyric: !!it.hasLyric || !!it.hasEmbedLyric,
     mtime: it.mtime || 0, size: it.size || 0,
+    // [v2.2 多源] 公共曲库歌曲行带源标注(前端副行「家庭NAS · 叶惠美」用);我的曲库条目无此二字段,形状不变
+    ...(it.sourceId ? { sourceId: it.sourceId, sourceName: it.sourceName } : {}),
 });
 const albumOut = (al) => {
     const names = Array.from(al.artistNames);
@@ -179,4 +190,4 @@ function stats(username) {
     };
 }
 
-module.exports = { listArtists, getArtist, listAlbums, getAlbum, listSongs, stats, invalidate, buildAgg };
+module.exports = { listArtists, getArtist, listAlbums, getAlbum, listSongs, stats, invalidate, buildAgg, registerItems };

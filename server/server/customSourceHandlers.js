@@ -436,12 +436,14 @@ async function handleList(req, res, username) {
     const allSources = [];
     const userSourceIds = new Set(userSources.map(s => s.id));
     openSources.forEach((s) => {
-        if (!userSourceIds.has(s.id)) {
-            if (userStates[s.id] && typeof userStates[s.id].enabled === 'boolean') {
-                s.enabled = userStates[s.id].enabled;
-            }
-            allSources.push(s);
+        if (userSourceIds.has(s.id)) return;
+        // lx205(0927): 全局禁用=管理员封禁,普通请求直接排除(管理员带 x-frontend-auth 可见可解禁);全局启用才允许用户态覆盖
+        const isAdminReq = req.headers['x-frontend-auth'] === global.lx.config['frontend.password'];
+        if (s.enabled === false && !isAdminReq) return;
+        if (s.enabled !== false && userStates[s.id] && typeof userStates[s.id].enabled === 'boolean') {
+            s.enabled = userStates[s.id].enabled;
         }
+        allSources.push(s);
     });
     allSources.push(...userSources);
     // 补充运行时状态及禁用平台配置

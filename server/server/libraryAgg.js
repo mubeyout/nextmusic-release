@@ -164,9 +164,10 @@ function getAlbum(username, albumId) {
     return { album: albumOut(target), songs };
 }
 
-function listSongs(username, { type = "recent", size = 30 } = {}) {
+function listSongs(username, { type = "recent", size = 30, offset = 0 } = {}) {
     const agg = buildAgg(username);
     size = Math.max(1, Math.min(size || 30, 200));
+    offset = Math.max(0, parseInt(offset) || 0);
     if (type === "random") {
         const arr = agg.items.slice();
         const n = Math.min(size, arr.length);
@@ -174,10 +175,10 @@ function listSongs(username, { type = "recent", size = 30 } = {}) {
             const j = i + Math.floor(Math.random() * (arr.length - i));
             [arr[i], arr[j]] = [arr[j], arr[i]];
         }
-        return { songs: arr.slice(0, n).map(songOut) };
+        return { songs: arr.slice(0, n).map(songOut), total: arr.length, offset: 0 };
     }
     const arr = agg.items.slice().sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
-    return { songs: arr.slice(0, size).map(songOut) };
+    return { songs: arr.slice(offset, offset + size).map(songOut), total: arr.length, offset };
 }
 
 function stats(username) {

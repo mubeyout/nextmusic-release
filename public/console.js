@@ -2,7 +2,7 @@
 (() => {
     'use strict';
     const $ = id => document.getElementById(id);
-    const names = {dashboard:'服务总览',users:'用户管理',data:'音乐数据',sources:'音源管理',webdav:'云端同步',snapshots:'快照备份',files:'文件管理',logs:'运行日志',config:'系统设置',about:'关于 NextMusic'};
+    const names = {dashboard:'服务总览',users:'用户与数据',data:'音乐数据',sources:'音源管理',library:'曲库管理',webdav:'云端同步',snapshots:'快照备份',files:'文件管理',logs:'运行日志',config:'系统设置',about:'关于 NextMusic'};
     const form = $('config-form');
     let baseline = null;
     const fingerprint = () => JSON.stringify(Array.from(form.elements).filter(el=>el.name).map(el=>[el.name,el.type==='checkbox'?el.checked:el.value]));

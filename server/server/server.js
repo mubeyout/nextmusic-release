@@ -4911,8 +4911,9 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 if (pathname === '/api/public-library/songs' && req.method === 'GET') {
                     const type = urlObj.searchParams.get('type') || 'recent';
                     const size = Math.min(parseInt(urlObj.searchParams.get('size')) || 100, 200); // [v2.2] 默认 100/页(spec ④;cap 200)
+                    const offset = Math.max(0, parseInt(urlObj.searchParams.get('offset')) || 0); // [D10] 分页偏移,打通超 200 首
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: true, data: publicLibrary.listSongs({ type, size }) }));
+                    res.end(JSON.stringify({ success: true, data: publicLibrary.listSongs({ type, size, offset }) }));
                     return;
                 }
                 // 账号设置"显示公共曲库"个人开关(仅授权账号可见该行——未授权在上方门禁已 404)

@@ -682,6 +682,32 @@ class App {
         this.loadUserData();
     }
 
+    setUserDetailTab(tab) {
+        this.userDetailTab = tab;
+        this.detailTabFilter();
+    }
+    detailTabFilter() {
+        const body = document.getElementById('user-detail-body');
+        if (!body) return;
+        const tab = this.userDetailTab || 'settings';
+        const cards = body.querySelectorAll('.detail-card');
+        cards.forEach(card => {
+            const h3 = card.querySelector('h3');
+            if (!h3) return;
+            const isData = h3.textContent.includes('音乐数据');
+            card.style.display = (tab === 'settings') ? (isData ? 'none' : '') : (isData ? '' : 'none');
+        });
+        const ts = document.getElementById('ud-tab-settings');
+        const td = document.getElementById('ud-tab-data');
+        if (ts) {
+            ts.style.color = tab === 'settings' ? 'var(--text)' : 'var(--muted)';
+            ts.style.borderBottom = tab === 'settings' ? '2px solid var(--green)' : '2px solid transparent';
+        }
+        if (td) {
+            td.style.color = tab === 'data' ? 'var(--text)' : 'var(--muted)';
+            td.style.borderBottom = tab === 'data' ? '2px solid var(--green)' : '2px solid transparent';
+        }
+    }
     renderUserDetail() {
         const body = document.getElementById('user-detail-body');
         if (!body) return;
@@ -697,8 +723,13 @@ class App {
         const dst = this.userStatsMap && this.userStatsMap[u.name];
         document.getElementById('user-detail-name').textContent = u.name;
         document.getElementById('user-detail-crumb').textContent = u.name;
+        this.detailTabFilter();
         document.getElementById('user-detail-sub').textContent = `${roleLabel} · 注册于 ${created}`;
         body.innerHTML = `
+            <div style="display:flex;gap:0;border-bottom:2px solid var(--line);margin-bottom:18px">
+<button id="ud-tab-settings" style="padding:10px 20px;border:0;background:none;font-size:14px;font-weight:600;cursor:pointer;color:var(--text);border-bottom:2px solid var(--green)" onclick="app.setUserDetailTab('settings')">设置</button>
+<button id="ud-tab-data" style="padding:10px 20px;border:0;background:none;font-size:14px;font-weight:600;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent" onclick="app.setUserDetailTab('data')">音乐数据</button>
+</div>
             <div class="glass detail-card">
                 <h3>基础信息</h3>
                 <div class="detail-grid">

@@ -1788,21 +1788,24 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 const out = [];
                 for (const name of (global.lx.config.users || []).map(u => u.name)) {
                     let playlists = 0, albums = 0, artists = 0, songs = 0;
+                    let lists = [], albumsArr = [], artistsArr = [];
                     try {
                         const userSpace = (0, user_1.getUserSpace)(name);
                         const data = await userSpace.listManage.getListData();
-                        const lists = data.userList || [];
+                        lists = data.userList || [];
                         playlists = lists.length;
                         lists.forEach(l => { songs += (l.list || []).length; });
                         songs += (data.defaultList || []).length + (data.loveList || []).length;
-                        albums = (await readArr(name, 'albums.json')).length;
-                        artists = (await readArr(name, 'artists.json')).length;
+                        albumsArr = await readArr(name, 'albums.json');
+                        artistsArr = await readArr(name, 'artists.json');
+                        albums = albumsArr.length;
+                        artists = artistsArr.length;
                     } catch (e) {
                         console.error('[stats] 统计失败', name, e);
                     }
                     const pl = lists[0] && lists[0].list && lists[0].list[0];
-                    const art = (await readArr(name, 'artists.json'))[0];
-                    const alb = (await readArr(name, 'albums.json'))[0];
+                    const art = artistsArr[0];
+                    const alb = albumsArr[0];
                     out.push({ name, playlists, albums, artists, songs, covers: { playlist: pl && pl.img || '', artist: art && art.img || '', album: alb && alb.img || '' } });
                 }
                 const total = out.reduce((a, x) => ({

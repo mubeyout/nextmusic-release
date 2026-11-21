@@ -58,3 +58,8 @@ html{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}button
 #user-search-input{height:38px;border-radius:10px;border:1px solid var(--line);padding:0 14px;font-size:14px;background:var(--surface)}
 /* 空状态优化 */
 .empty-state{padding:40px 20px;text-align:center;color:var(--muted);font-size:14px}
+
+/* [KAI 1121 fix] 表头不卡片化 */
+.trow.hd.users-row{background:var(--surface2);border:0;border-radius:8px 8px 0 0;margin-bottom:0;padding:10px 18px;font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.trow.hd.users-row:hover{border-color:transparent}
+

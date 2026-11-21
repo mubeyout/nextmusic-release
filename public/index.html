@@ -20,7 +20,7 @@
     <link rel="stylesheet" href="style.css">
     <script>try{document.documentElement.dataset.theme=localStorage.getItem('nextmusic-admin-theme')||'light'}catch(e){document.documentElement.dataset.theme='light'}</script>
     <link rel="stylesheet" href="console.css">
-    <link rel="icon" href="icon.svg" type="image/svg+xml">
+    <link rel="icon" href="brand.png" type="image/png">
     <link rel="manifest" href="manifest.json">
     <script>
         if ('serviceWorker' in navigator) {
@@ -75,15 +75,7 @@
     <div id="login-overlay">
         <div class="login-card">
             <div class="login-art">
-                <svg viewBox="0 0 320 320" aria-label="NextMusic">
-                    <defs><clipPath id="lg-clip"><rect width="320" height="320" rx="72"/></clipPath></defs>
-                    <g clip-path="url(#lg-clip)">
-                        <rect width="320" height="320" fill="#020805"/>
-                        <path d="M134.4 72.5954C134.4 66.1954 139.2 64.5954 144 69.3954L166.4 91.7954V206.995C166.4 234.195 145.6 253.395 116.8 253.395C89.5999 253.395 70.3999 235.795 70.3999 211.795C70.3999 187.795 89.5999 170.195 116.8 170.195C123.2 170.195 129.6 171.795 134.4 173.395V72.5954Z" fill="#1ED760"/>
-                        <path d="M179.2 112.595L208 139.795V218.195C208 232.595 201.6 238.995 193.6 238.995C184 238.995 179.2 232.595 179.2 219.795V112.595Z" fill="#6BE88F"/>
-                        <path d="M220.8 152.595L249.6 179.795V218.195C249.6 232.595 243.2 238.995 235.2 238.995C225.6 238.995 220.8 232.595 220.8 219.795V152.595Z" fill="#6BE88F"/>
-                    </g>
-                </svg>
+                <img src="brand.png" alt="NextMusic" class="login-img">
             </div>
             <div class="login-eyebrow">NEXTMUSIC CONSOLE</div><h1>管理你的音乐世界</h1>
             <div class="sub">连接、同步与备份，一切尽在掌握。</div>
@@ -102,13 +94,7 @@
 
         <aside class="sidebar" id="sidebar">
             <div class="brand">
-                <span class="brand-mark">
-                    <svg viewBox="0 0 200 200" aria-hidden="true">
-                        <path d="M84 45.7443C84 41.7443 87 40.7443 90 43.7443L104 57.7443V129.744C104 146.744 91 158.744 73 158.744C56 158.744 44 147.744 44 132.744C44 117.744 56 106.744 73 106.744C77 106.744 81 107.744 84 108.744V45.7443Z" fill="#1ED760"/>
-                        <path d="M112 70.7444L130 87.7444V136.744C130 145.744 126 149.744 121 149.744C115 149.744 112 145.744 112 137.744V70.7444Z" fill="#2DDB6E"/>
-                        <path d="M138 95.7444L156 112.744V136.744C156 145.744 152 149.744 147 149.744C141 149.744 138 145.744 138 137.744V95.7444Z" fill="#4AE182"/>
-                    </svg>
-                </span>
+                <span class="brand-mark"><img src="brand.png" alt="NextMusic" class="brand-img"></span>
                 <b>NextMusic</b>
             </div>
 <div class="console-edition">管理控制台 <span>SERVER</span></div><nav aria-label="主导航"><div class="nav-label">工作台</div><a href="#dashboard" class="nav-item on" data-view="dashboard"><svg class="ic2"><use href="#i-dash"/></svg><span>服务总览</span></a><div class="nav-label">内容与用户</div><a href="#users" class="nav-item" data-view="users"><svg class="ic2"><use href="#i-user"/></svg><span>用户管理</span></a><a href="#data" class="nav-item" data-view="data"><svg class="ic2"><use href="#i-music"/></svg><span>音乐数据</span></a><a href="#sources" class="nav-item" data-view="sources"><svg class="ic2"><use href="#i-wave"/></svg><span>音源管理</span></a><a href="#library" class="nav-item" data-view="library"><svg class="ic2"><use href="#i-disc"/></svg><span>曲库管理</span></a><div class="nav-label">同步与存储</div><a href="#webdav" class="nav-item" data-view="webdav"><svg class="ic2"><use href="#i-cloud"/></svg><span>云端同步</span></a><a href="#snapshots" class="nav-item" data-view="snapshots"><svg class="ic2"><use href="#i-snap"/></svg><span>快照备份</span></a><a href="#files" class="nav-item" data-view="files"><svg class="ic2"><use href="#i-folder"/></svg><span>文件管理</span></a><div class="nav-label">系统</div><a href="#logs" class="nav-item" data-view="logs"><svg class="ic2"><use href="#i-log"/></svg><span>运行日志</span></a><a href="#config" class="nav-item" data-view="config"><svg class="ic2"><use href="#i-gear"/></svg><span>系统设置</span></a></nav><div class="side-b"><a class="nav-item" data-view="music" id="nav-player-link" target="_blank" rel="noopener"><svg class="ic2"><use href="#i-play"/></svg><span>打开播放器</span><span class="nav-external">↗</span></a><a href="#about" class="nav-item" data-view="about"><svg class="ic2"><use href="#i-info"/></svg><span>关于 NextMusic</span></a><div class="side-logout"><button class="nav-item" id="logout-btn"><svg class="ic2"><use href="#i-power"/></svg>退出登录</button></div></div>            <div class="side-ver" id="sidebar-version">NextMusic Server</div>
@@ -191,7 +177,7 @@
                 <div class="vhd">
                     <div><h2>用户管理</h2><div class="sub" id="users-subtitle">管理服务器的同步用户</div></div>
                     <div class="acts">
-                        <div class="search-box"><svg class="ic"><use href="#i-search"/></svg><input type="text" id="user-search-input" placeholder="输入用户名搜索..." aria-label="搜索用户"></div>
+                        <div class="search-box"><svg class="ic"><use href="#i-search"/></svg><input type="text" id="user-search-input" placeholder="输入用户名搜索..." aria-label="搜索用户" oninput="app.filterUsers()"><button class="search-clear hidden" id="user-search-clear" aria-label="清空搜索" onclick="app.clearUserSearch()">×</button></div>
                         <button class="pill ghost" id="refresh-users-btn"><svg class="ic"><use href="#i-refresh"/></svg> 刷新列表</button>
                         <button class="pill danger hidden" id="batch-delete-users-btn"><svg class="ic"><use href="#i-trash"/></svg> 批量删除 (<span id="user-selected-count">0</span>)</button>
                         <button class="pill" id="add-user-btn"><svg class="ic"><use href="#i-plus"/></svg> 新增用户</button>
@@ -203,18 +189,47 @@
                         <div class="field" style="margin:0"><label>默认配额(MB)</label><div class="cfg-btns"><input type="number" class="inp" id="quota-default" style="width:140px" min="0"><button class="mini" id="quota-default-btn">保存</button></div></div>
                     </div>
                 </div>
+                <div class="glass" style="margin-bottom:16px;padding:16px 18px">
+                    <div class="lib-grid" style="align-items:center">
+                        <div class="field" style="margin:0">
+                            <label>注册授权码</label>
+                            <div class="cfg-btns">
+                                <input type="number" class="inp" id="invite-count" style="width:90px" min="1" max="50" value="1" title="生成数量">
+                                <input type="text" class="inp" id="invite-note" style="width:170px" placeholder="备注（可选）">
+                                <button class="mini primary" onclick="app.createInviteCodes()">生成授权码</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="invite-codes-list" style="margin-top:12px"></div>
+                </div>
                 <div class="glass hidden" id="user-requests-box" style="margin-bottom:16px;padding:16px 18px">
                     <h3 style="margin:0 0 10px">待审批申请</h3>
                     <div id="user-requests"></div>
                 </div>
+                <div class="glass user-stats-strip" id="users-stats-strip"></div>
                 <div class="table">
                     <div class="trow hd users-row">
                         <span><input type="checkbox" class="sel" id="select-all-users" aria-label="选择所有可见用户"></span><span>用户</span>
-                        <span>连接密码</span><span class="col-devices">账号</span><span>自定义目录</span>
+                        <span>角色</span><span>自定义目录</span>
                         <span style="text-align:right">操作</span>
                     </div>
                     <div id="users-list"></div>
                 </div>
+            </section>
+
+            <!-- ============ 账号内页 ============ -->
+            <section class="view hidden" id="view-user-detail">
+                <div class="crumb">Server / <a href="javascript:;" onclick="app.closeUserDetail()">用户</a> / <b id="user-detail-crumb">账号详情</b></div>
+                <div class="vhd">
+                    <div>
+                        <h2 id="user-detail-name">账号详情</h2>
+                        <div class="sub" id="user-detail-sub"></div>
+                    </div>
+                    <div class="acts">
+                        <button class="pill ghost" onclick="app.closeUserDetail()">← 返回用户</button>
+                    </div>
+                </div>
+                <div id="user-detail-body"></div>
             </section>
 
             <!-- ============ 数据 ============ -->
@@ -704,15 +719,7 @@
                 <div class="glass">
                     <div class="about-hero">
                         <div class="a-art">
-                            <svg viewBox="0 0 320 320" aria-hidden="true">
-                                <defs><clipPath id="ab-clip"><rect width="320" height="320" rx="72"/></clipPath></defs>
-                                <g clip-path="url(#ab-clip)">
-                                    <rect width="320" height="320" fill="#020805"/>
-                                    <path d="M134.4 72.5954C134.4 66.1954 139.2 64.5954 144 69.3954L166.4 91.7954V206.995C166.4 234.195 145.6 253.395 116.8 253.395C89.5999 253.395 70.3999 235.795 70.3999 211.795C70.3999 187.795 89.5999 170.195 116.8 170.195C123.2 170.195 129.6 171.795 134.4 173.395V72.5954Z" fill="#1ED760"/>
-                                    <path d="M179.2 112.595L208 139.795V218.195C208 232.595 201.6 238.995 193.6 238.995C184 238.995 179.2 232.595 179.2 219.795V112.595Z" fill="#6BE88F"/>
-                                    <path d="M220.8 152.595L249.6 179.795V218.195C249.6 232.595 243.2 238.995 235.2 238.995C225.6 238.995 220.8 232.595 220.8 219.795V152.595Z" fill="#6BE88F"/>
-                                </g>
-                            </svg>
+                            <img src="brand.png" alt="NextMusic" class="about-img">
                         </div>
                         <h3>NextMusic Server</h3>
                         <div class="as">你的音乐，你的服务器</div>

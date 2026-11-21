@@ -1,7 +1,7 @@
 # NextMusic Server
 
 <div align="center">
-  <img src="/icon.svg" width="100" height="100" alt="LX Sync Logo">
+  <img src="/admin/brand.png" width="100" height="100" alt="NextMusic Logo">
   <br>
   <h1>NextMusic Server</h1>
   <p>

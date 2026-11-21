@@ -111,6 +111,28 @@ setInterval(() => {
 /** 用户 Token 存储：token → { username, createdAt } */
 const userSessions = new Map();
 const USER_SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7天
+// 会话落盘:避免容器重启/重建后内存会话清空导致 Web 端被迫重新登录
+const sessionsPath = () => node_path_1.default.join(global.lx.dataPath, 'sessions.json');
+const persistSessions = () => {
+  try {
+    const out = {};
+    const now = Date.now();
+    for (const [tk, sess] of userSessions) {
+      if (now - sess.createdAt <= USER_SESSION_TTL) out[tk] = sess;
+    }
+    node_fs_1.default.writeFileSync(sessionsPath(), JSON.stringify(out));
+  } catch (e) { console.error('[Session] 写盘失败:', e); }
+};
+const restoreSessions = () => {
+  try {
+    if (!node_fs_1.default.existsSync(sessionsPath())) return;
+    const raw = JSON.parse(node_fs_1.default.readFileSync(sessionsPath(), 'utf8') || '{}');
+    const now = Date.now();
+    for (const [tk, sess] of Object.entries(raw || {})) {
+      if (sess && sess.username && now - sess.createdAt <= USER_SESSION_TTL) userSessions.set(tk, sess);
+    }
+  } catch (e) { console.error('[Session] 恢复失败:', e); }
+};
 /** 持久化 Token 快速查找缓存：token → username */
 const persistentTokens = new Map();
 /** 持久化 Token 元数据缓存：token → token 对象（含 disabled/expiresAt/lastUsed）*/
@@ -193,6 +215,7 @@ const saveUserTokenConfig = (username, config) => {
 };
 // 初始化加载所有用户的持久化 Token
 setTimeout(() => {
+    restoreSessions();
     if (global.lx.config && global.lx.config.users) {
         global.lx.config.users.forEach((u) => saveUserTokenConfig(u.name, getUserTokenConfig(u.name)));
     }
@@ -654,6 +677,7 @@ const saveUsers = () => {
             enableCustomMusicDir: u.enableCustomMusicDir,
             customMusicDir: u.customMusicDir,
             allowOperateCustomMusicDir: u.allowOperateCustomMusicDir,
+            avatar: u.avatar || '',
         })), null, 2));
         return true;
     }
@@ -661,6 +685,53 @@ const saveUsers = () => {
         console.error('Failed to save users.json', err);
         return false;
     }
+};
+// ── 注册授权码:存 dataPath/invite-codes.json(预留后续自动发货/支付回调写入) ──
+const inviteCodesPath = () => node_path_1.default.join(global.lx.dataPath, 'invite-codes.json');
+let inviteCodesCache = null;
+const loadInviteCodes = () => {
+  if (inviteCodesCache) return inviteCodesCache;
+  try {
+    if (node_fs_1.default.existsSync(inviteCodesPath())) {
+      const raw = JSON.parse(node_fs_1.default.readFileSync(inviteCodesPath(), 'utf-8'));
+      inviteCodesCache = Array.isArray(raw && raw.codes) ? raw.codes : [];
+    } else inviteCodesCache = [];
+  } catch (e) { inviteCodesCache = []; }
+  return inviteCodesCache;
+};
+const saveInviteCodes = () => {
+  try { node_fs_1.default.writeFileSync(inviteCodesPath(), JSON.stringify({ codes: inviteCodesCache || [] }, null, 2)); }
+  catch (e) { console.error('Failed to save invite-codes.json', e); }
+};
+const genInviteCode = () => {
+  const ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < 12; i++) {
+    out += ABC[Math.floor(Math.random() * ABC.length)];
+    if (i === 3 || i === 7) out += '-';
+  }
+  return out;
+};
+const findValidInvite = (code) => {
+  if (!code) return null;
+  const list = loadInviteCodes();
+  return list.find(c => c.code === code && !c.revoked && (c.uses || []).length < (c.maxUses || 1)) || null;
+};
+// ── 用户头像:文件存 dataPath/avatars,用户配置内只留文件名 ──
+const AVATAR_MIME = { png: 'image/png', jpeg: 'image/jpeg', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+const AVATAR_MAX_BYTES = 1024 * 1024;
+const avatarDir = () => node_path_1.default.join(global.lx.dataPath, 'avatars');
+const avatarPathOf = (username) => {
+    const user = (global.lx.config.users || []).find(u => u.name === username);
+    if (!user || !user.avatar) return null;
+    return node_path_1.default.join(avatarDir(), user.avatar);
+};
+const avatarSafeName = (username, ext) =>
+    'avatar_' + String(username).replace(/[^a-zA-Z0-9_-]/g, '_') + '.' + ext;
+/** 头像访问 URL(带时间戳防缓存) */
+const avatarUrlOf = (username) => {
+    const user = (global.lx.config.users || []).find(u => u.name === username);
+    return user && user.avatar ? '/api/user/avatar?t=' + Date.now() : null;
 };
 /** [新增] 服务器内部热重载数据 */
 const reloadServerData = async () => {
@@ -1390,7 +1461,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             }
             if (pathname === '/api/users') {
                 const auth = req.headers['x-frontend-auth'];
-                if (auth !== global.lx.config['frontend.password']) {
+                const __isAdminAuth = auth === global.lx.config['frontend.password'];
+                if (req.method !== 'POST' && !__isAdminAuth) {
                     res.writeHead(401);
                     res.end('Unauthorized');
                     return;
@@ -1409,6 +1481,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         catch (_a) { /* 目录缺失=未知 */ }
                         return {
                             name: u.name,
+                            avatar: u.avatar || '',
                             password: u.password,
                             enableCustomMusicDir: u.enableCustomMusicDir ?? false,
                             customMusicDir: u.customMusicDir || '',
@@ -1423,7 +1496,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                             cloudDefaultQuotaMB: cloudLibCfg.defaultQuotaMB || 10240,
                             cloudDisabled: publicLibrary.isCloudDisabled(u.name),
                             cloudFormats: publicLibrary.getUserFormats(u.name),
-                            audit: publicLibrary.listUserAudit(u.name, 6),
+                            audit: publicLibrary.listUserAudit(u.name, 20),
                         };
                     });
                     if (global.lx.config['user.enablePublicFavorites']) {
@@ -1437,12 +1510,23 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     return;
                 }
                 if (req.method === 'POST') {
+                    const __invite = __isAdminAuth ? null : findValidInvite(auth);
+                    if (!__isAdminAuth && !__invite) {
+                        res.writeHead(401);
+                        res.end('Unauthorized: 授权码无效或已使用');
+                        return;
+                    }
                     void readBody(req).then(body => {
                         try {
                             const { name, password } = JSON.parse(body);
                             if (!name || !password) {
                                 res.writeHead(400);
                                 res.end('Missing name or password');
+                                return;
+                            }
+                            if (!/^[A-Za-z0-9_-]{2,20}$/.test(String(name).trim())) {
+                                res.writeHead(400);
+                                res.end('用户名需为 2-20 位字母/数字/下划线/中划线');
                                 return;
                             }
                             if (global.lx.config.users.some(u => u.name === name)) {
@@ -1460,6 +1544,11 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                                 dataPath,
                             });
                             saveUsers();
+                            if (__invite) {
+                                __invite.uses = __invite.uses || [];
+                                __invite.uses.push({ username: name, at: Date.now() });
+                                saveInviteCodes();
+                            }
                             res.writeHead(200);
                             res.end(JSON.stringify({ success: true }));
                         }
@@ -1680,6 +1769,70 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     res.writeHead(500);
                     res.end(err.message);
                 });
+                return;
+            }
+            // [新增] 后台:按用户统计歌单/专辑/歌手/歌曲数量 + 全站合计
+            if (pathname === '/api/admin/users-stats' && req.method === 'GET') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end('Unauthorized');
+                    return;
+                }
+                const readArr = async (uname, f) => {
+                    const p = node_path_1.default.join(global.lx.userPath, (0, user_1.getUserDirname)(uname), 'library', f);
+                    const exists = await node_fs_1.default.promises.stat(p).then(() => true).catch(() => false);
+                    if (!exists) return [];
+                    return JSON.parse(await node_fs_1.default.promises.readFile(p, 'utf8'));
+                };
+                const out = [];
+                for (const name of (global.lx.config.users || []).map(u => u.name)) {
+                    let playlists = 0, albums = 0, artists = 0, songs = 0;
+                    try {
+                        const userSpace = (0, user_1.getUserSpace)(name);
+                        const data = await userSpace.listManage.getListData();
+                        const lists = data.userList || [];
+                        playlists = lists.length;
+                        lists.forEach(l => { songs += (l.list || []).length; });
+                        songs += (data.defaultList || []).length + (data.loveList || []).length;
+                        albums = (await readArr(name, 'albums.json')).length;
+                        artists = (await readArr(name, 'artists.json')).length;
+                    } catch (e) {
+                        console.error('[stats] 统计失败', name, e);
+                    }
+                    const pl = lists[0] && lists[0].list && lists[0].list[0];
+                    const art = (await readArr(name, 'artists.json'))[0];
+                    const alb = (await readArr(name, 'albums.json'))[0];
+                    out.push({ name, playlists, albums, artists, songs, covers: { playlist: pl && pl.img || '', artist: art && art.img || '', album: alb && alb.img || '' } });
+                }
+                const total = out.reduce((a, x) => ({
+                    playlists: a.playlists + x.playlists,
+                    albums: a.albums + x.albums,
+                    artists: a.artists + x.artists,
+                    songs: a.songs + x.songs
+                }), { playlists: 0, albums: 0, artists: 0, songs: 0 });
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+                res.end(JSON.stringify({ users: out, total }));
+                return;
+            }
+            // [新增] 后台:管理员鉴权直读任意用户头像(后台 <img> 无法携带用户 token)
+            if (pathname === '/api/admin/avatar' && req.method === 'GET') {
+                const auth = req.headers['x-frontend-auth'] || urlObj.searchParams.get('auth');
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end('Unauthorized');
+                    return;
+                }
+                const name = urlObj.searchParams.get('user') || '';
+                const file = avatarPathOf(name);
+                if (!file || !node_fs_1.default.existsSync(file)) {
+                    res.writeHead(404);
+                    res.end('Not Found');
+                    return;
+                }
+                const ext = node_path_1.default.extname(file).slice(1).toLowerCase();
+                res.writeHead(200, { 'Content-Type': AVATAR_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+                res.end(node_fs_1.default.readFileSync(file));
                 return;
             }
             // 获取快照列表
@@ -2059,9 +2212,10 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         if (ok) {
                             const token = generateSessionId();
                             userSessions.set(token, { username, createdAt: Date.now() });
+                            persistSessions();
                             log4js_1.loginLog.info(`User token issued: ${username} from ${ip}`);
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true, token, username }));
+                            res.end(JSON.stringify({ success: true, token, username, avatar: avatarUrlOf(username) }));
                         }
                         else {
                             log4js_1.loginLog.warn(`User login failed: ${username} from ${ip}`);
@@ -2079,8 +2233,74 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             // [新增] 用户登出 - 注销 Token
             if (pathname === '/api/user/logout' && req.method === 'POST') {
                 const token = req.headers['x-user-token'];
-                if (token)
+                if (token) {
                     userSessions.delete(token);
+                    persistSessions();
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true }));
+                return;
+            }
+            // ---- 用户头像:读取当前登录用户头像 ----
+            if (pathname === '/api/user/avatar' && req.method === 'GET') {
+                const __urlToken = urlObj.searchParams.get('token');
+                if (__urlToken && !req.headers['x-user-token']) { req.headers['x-user-token'] = __urlToken; }
+                const username = (0, exports.verifyUserAuth)(req);
+                if (!username) { res.writeHead(401); res.end('Unauthorized'); return; }
+                const file = avatarPathOf(username);
+                if (!file || !node_fs_1.default.existsSync(file)) { res.writeHead(404); res.end('Not Found'); return; }
+                const ext = node_path_1.default.extname(file).slice(1).toLowerCase();
+                res.writeHead(200, { 'Content-Type': AVATAR_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+                try { res.end(node_fs_1.default.readFileSync(file)); }
+                catch { res.writeHead(500); res.end('read error'); }
+                return;
+            }
+            // ---- 用户头像:上传/更换(JSON base64 dataURL) ----
+            if (pathname === '/api/user/avatar' && req.method === 'POST') {
+                const username = (0, exports.verifyUserAuth)(req);
+                if (!username) { res.writeHead(401); res.end('Unauthorized'); return; }
+                void readBody(req).then(async (body) => {
+                    try {
+                        const { avatar } = JSON.parse(body || '{}');
+                        const m = /^data:image\/(png|jpeg|jpg|webp|gif);base64,(.+)$/i.exec(String(avatar || ''));
+                        if (!m) throw new Error('头像格式不支持（仅 PNG/JPEG/WebP/GIF）');
+                        const extRaw = m[1].toLowerCase();
+                        const ext = extRaw === 'jpg' ? 'jpeg' : extRaw;
+                        const buf = Buffer.from(m[2], 'base64');
+                        if (!buf.length) throw new Error('头像内容为空');
+                        if (buf.length > AVATAR_MAX_BYTES) throw new Error('头像不能超过 1 MB');
+                        const user = global.lx.config.users.find(u => u.name === username);
+                        if (!user) throw new Error('账号不存在');
+                        const dir = avatarDir();
+                        if (!node_fs_1.default.existsSync(dir)) node_fs_1.default.mkdirSync(dir, { recursive: true });
+                        if (user.avatar) {
+                            const old = node_path_1.default.join(dir, user.avatar);
+                            try { if (node_fs_1.default.existsSync(old)) node_fs_1.default.unlinkSync(old); } catch { /* 旁路清理 */ }
+                        }
+                        const filename = avatarSafeName(username, ext);
+                        node_fs_1.default.writeFileSync(node_path_1.default.join(dir, filename), buf);
+                        user.avatar = filename;
+                        saveUsers();
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, avatarUrl: '/api/user/avatar?t=' + Date.now() }));
+                    } catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
+            // ---- 用户头像:移除 ----
+            if (pathname === '/api/user/avatar' && req.method === 'DELETE') {
+                const username = (0, exports.verifyUserAuth)(req);
+                if (!username) { res.writeHead(401); res.end('Unauthorized'); return; }
+                const user = global.lx.config.users.find(u => u.name === username);
+                if (user && user.avatar) {
+                    const old = node_path_1.default.join(avatarDir(), user.avatar);
+                    try { if (node_fs_1.default.existsSync(old)) node_fs_1.default.unlinkSync(old); } catch { /* 旁路清理 */ }
+                    delete user.avatar;
+                    saveUsers();
+                }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ success: true }));
                 return;
@@ -2101,7 +2321,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     }
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ valid, username: username || null, enableCustomMusicDir, allowOperateCustomMusicDir }));
+                res.end(JSON.stringify({ valid, username: username || null, enableCustomMusicDir, allowOperateCustomMusicDir, avatar: avatarUrlOf(username) }));
                 return;
             }
             // [新增] Get User List (User Auth)
@@ -2400,6 +2620,59 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     catch (err) {
                         res.writeHead(400);
                         res.end('Invalid JSON data');
+                    }
+                });
+                return;
+            }
+            // [新增] 第三方媒体库配置同步备份 /api/user/providers
+            if (pathname === '/api/user/providers' && req.method === 'GET') {
+                const resolvedUsername = (0, exports.verifyUserAuth)(req);
+                if (!resolvedUsername) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                    return;
+                }
+                const userDirname = (0, user_1.getUserDirname)(resolvedUsername);
+                const filePath = node_path_1.default.join(global.lx.userPath, userDirname, 'providers.json');
+                try {
+                    if (!node_fs_1.default.existsSync(filePath)) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end('[]');
+                        return;
+                    }
+                    const data = node_fs_1.default.readFileSync(filePath, 'utf8');
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(data);
+                }
+                catch (e) {
+                    res.writeHead(500);
+                    res.end(e.message);
+                }
+                return;
+            }
+            if (pathname === '/api/user/providers' && req.method === 'POST') {
+                const resolvedUsername = (0, exports.verifyUserAuth)(req);
+                if (!resolvedUsername) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+                    return;
+                }
+                void readBody(req).then(body => {
+                    try {
+                        const parsed = JSON.parse(body);
+                        if (!Array.isArray(parsed))
+                            throw new Error('Expected an array');
+                        const userDirname = (0, user_1.getUserDirname)(resolvedUsername);
+                        const dir = node_path_1.default.join(global.lx.userPath, userDirname);
+                        if (!node_fs_1.default.existsSync(dir))
+                            node_fs_1.default.mkdirSync(dir, { recursive: true });
+                        node_fs_1.default.writeFileSync(node_path_1.default.join(dir, 'providers.json'), JSON.stringify(parsed, null, 2), 'utf-8');
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true }));
+                    }
+                    catch (e) {
+                        res.writeHead(400);
+                        res.end(e.message);
                     }
                 });
                 return;
@@ -4462,6 +4735,50 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 });
                 return;
             }
+            // ---- 管理端:账号云曲库曲目清单 ----
+            if (pathname === '/api/admin/user/songs' && req.method === 'GET') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                const q = new URL(req.url ?? '', `http://${req.headers.host}`).searchParams;
+                try {
+                    const data = publicLibrary.adminListUserSongs(q.get('username') || '', {
+                        keyword: q.get('keyword') || '',
+                        page: q.get('page'),
+                        pageSize: q.get('pageSize'),
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, data }));
+                } catch (e) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: e.message }));
+                }
+                return;
+            }
+            // ---- 管理端:账号云曲库单首删除 ----
+            if (pathname === '/api/admin/user/song/delete' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: '权限不足：需要管理员身份。' }));
+                    return;
+                }
+                void readBody(req).then(async (body) => {
+                    try {
+                        const { username, filename } = JSON.parse(body || '{}');
+                        const data = publicLibrary.adminRemoveUserSong(String(username || ''), filename);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data }));
+                    } catch (e) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: e.message }));
+                    }
+                });
+                return;
+            }
             // ---- 管理端:云曲库配额(后台用量展示/逐账号限额,钩子对齐 cacheSizeLimit 模式) ----
             if (pathname === '/api/admin/cloud-quota' && req.method === 'GET') {
                 const auth = req.headers['x-frontend-auth'];
@@ -6284,6 +6601,52 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     res.writeHead(401, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: false, error: '管理员密码验证失败' }));
                 }
+                return;
+            }
+            // ---- 注册授权码管理(管理员鉴权) ----
+            if (pathname === '/api/admin/invite-codes' && req.method === 'GET') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: '权限不足' })); return; }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, data: loadInviteCodes() }));
+                return;
+            }
+            if (pathname === '/api/admin/invite-codes' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: '权限不足' })); return; }
+                void readBody(req).then(body => {
+                    try {
+                        const cfg = JSON.parse(body || '{}');
+                        const count = Math.min(Math.max(parseInt(cfg.count, 10) || 1, 1), 50);
+                        const maxUses = Math.max(parseInt(cfg.maxUses, 10) || 1, 1);
+                        const note = String(cfg.note || '').slice(0, 60);
+                        const list = loadInviteCodes();
+                        const created = [];
+                        for (let i = 0; i < count; i++) {
+                            const code = { code: genInviteCode(), createdAt: Date.now(), createdBy: 'admin', note, maxUses, uses: [], revoked: false };
+                            list.push(code); created.push(code);
+                        }
+                        inviteCodesCache = list; saveInviteCodes();
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, data: created }));
+                    } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: e.message })); }
+                });
+                return;
+            }
+            if (pathname === '/api/admin/invite-codes/revoke' && req.method === 'POST') {
+                const auth = req.headers['x-frontend-auth'];
+                if (auth !== global.lx.config['frontend.password']) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: '权限不足' })); return; }
+                void readBody(req).then(body => {
+                    try {
+                        const { code } = JSON.parse(body || '{}');
+                        const list = loadInviteCodes();
+                        const item = list.find(c => c.code === code);
+                        if (!item) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: '授权码不存在' })); return; }
+                        item.revoked = true; inviteCodesCache = list; saveInviteCodes();
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true }));
+                    } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: e.message })); }
+                });
                 return;
             }
             if (pathname === '/api/custom-source/validate' && req.method === 'POST') {

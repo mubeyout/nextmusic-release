@@ -15,7 +15,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { customIndexManager, getCustomMusicDir } = require("./customMusicManager");
+const { customIndexManager, getCustomMusicDir, removeCustomFile } = require("./customMusicManager");
 const libraryAgg = require("./libraryAgg");
 const connectors = require("./sourceConnectors");
 
@@ -657,11 +657,13 @@ function getUserQuotaBytes(username) {
 }
 function quotaInfo(username) {
     const cloud = readCloudConfig();
-    const usedBytes = getUserUsageBytes(username);
+    const items = customIndexManager.getAll(username);
+    const usedBytes = items.reduce((n, it) => n + (it.size || 0), 0);
     const quotaBytes = getUserQuotaBytes(username);
     const finite = quotaBytes !== Infinity;
     return {
         enabled: cloud.enableQuota,
+        count: items.length,
         usedBytes,
         quotaBytes: finite ? quotaBytes : -1, // -1=不限(JSON 可序列化)
         quotaMB: finite ? Math.round(quotaBytes / 1024 / 1024) : -1,
@@ -799,6 +801,43 @@ function listUserUsage() {
     });
 }
 
+// ── 后台账号维度:某账号云曲库曲目清单 / 单首删除 ──
+function adminListUserSongs(username, { keyword = '', page = 1, pageSize = 50 } = {}) {
+    if (!username || username === '_open' || username === 'default') throw new Error('账号无效');
+    if (!(global.lx.config.users || []).some(u => u.name === username)) throw new Error('账号不存在');
+    let items = customIndexManager.getAll(username).map(it => ({
+        filename: it.filename,
+        name: it.name || path.basename(it.filename || ''),
+        singer: it.singer || '未知歌手',
+        album: it.album || '',
+        size: it.size || 0,
+        quality: it.quality || '',
+        interval: it.interval || '',
+        hasLyric: !!(it.hasLyric || it.lyricFilename),
+    }));
+    if (keyword) {
+        const k = String(keyword).toLowerCase();
+        items = items.filter(x => [x.name, x.singer, x.album, x.filename]
+            .some(v => String(v || '').toLowerCase().includes(k)));
+    }
+    const total = items.length;
+    const totalBytes = items.reduce((n, x) => n + (x.size || 0), 0);
+    const size = Math.max(1, Math.min(Number(pageSize) || 50, 200));
+    const p = Math.max(1, Number(page) || 1);
+    const rows = items.slice((p - 1) * size, p * size);
+    return { total, totalBytes, page: p, pageSize: size, items: rows };
+}
+function adminRemoveUserSong(username, filename) {
+    if (!username || username === '_open' || username === 'default') throw new Error('账号无效');
+    if (!(global.lx.config.users || []).some(u => u.name === username)) throw new Error('账号不存在');
+    if (!filename) throw new Error('缺少文件名');
+    const ok = removeCustomFile(String(filename), username);
+    if (!ok) throw new Error('文件不存在或已被移除');
+    try { libraryAgg.invalidate(username); } catch { /* 聚合缓存失效为旁路 */ }
+    cloudAudit(username, 'songDelete', `删除曲目 ${String(filename).slice(0, 80)}`);
+    return { username, filename, ...quotaInfo(username) };
+}
+
 // ── 后台歌曲级管理:清单检索 / 删除 ──
 /** 后台曲目清单:按曲源 + 关键词(歌名/歌手/专辑/文件名)检索,分页 */
 function adminListSongs({ sourceId, keyword, page, pageSize } = {}) {
@@ -882,4 +921,5 @@ module.exports = {
     quotaInfo, checkQuota, getUserUsageBytes, getUserQuotaBytes,
     setUserQuota, setDefaultQuota, setQuotaEnabled, listUserUsage, cleanupUserCloud,
     isCloudDisabled, setUserCloudDisabled, getUserFormats, setUserFormats, isFormatAllowed, listUserAudit,
+    adminListUserSongs, adminRemoveUserSong,
 };

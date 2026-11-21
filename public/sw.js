@@ -1,4 +1,4 @@
-const CACHE_NAME = 'lx-sync-server-console-v4';
+const CACHE_NAME = 'lx-sync-server-console-v5';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
@@ -8,7 +8,7 @@ const ASSETS_TO_CACHE = [
     './console.js',
     './js/ui-utils.js',
     './js/notification-engine.js',
-    './icon.svg',
+    './brand.png',
     './manifest.json',
     './vendor/js/marked.min.js',
     './vendor/fonts/inter.css'

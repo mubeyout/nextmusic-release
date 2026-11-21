@@ -256,7 +256,8 @@ class App {
 
         switch (viewName) {
             case 'dashboard': this.loadDashboard(); break;
-            case 'users': this.loadUsers(); break;
+            case 'users': this.loadUsers(); this.loadInviteCodes(); break;
+            case 'user-detail': break;
             case 'data': this.loadUserData(); break;
             case 'config': if (!this.configLoaded) this.loadConfig(); break;
             case 'logs': this.loadLogs(); break;
@@ -411,10 +412,11 @@ class App {
         if (!svg) return;
         document.getElementById('chart-empty')?.classList.toggle('hidden', this.cpuHistory.length >= 2);
         if (this.cpuHistory.length < 2) return;
-        const W = 600, H = 150, pad = 8;
+        const W = 600, H = 150, pad = 8, padL = 34, padR = 8;
+        const plotW = W - padL - padR;
         const line = (data, maxScale) => {
             const n = data.length;
-            const pts = data.map((v, i) => [i / (n - 1) * W, H - (Math.min(v, maxScale) / maxScale) * (H - pad * 2) - pad]);
+            const pts = data.map((v, i) => [padL + i / (n - 1) * plotW, H - (Math.min(v, maxScale) / maxScale) * (H - pad * 2) - pad]);
             let d = `M ${pts[0][0]} ${pts[0][1]}`;
             for (let i = 0; i < pts.length - 1; i++) {
                 const xc = (pts[i][0] + pts[i + 1][0]) / 2, yc = (pts[i][1] + pts[i + 1][1]) / 2;
@@ -427,14 +429,14 @@ class App {
         const memL = line(this.memHistory, 100);
         svg.innerHTML = `
             <g stroke="var(--line)" stroke-width="1">
-                <line x1="0" y1="41.5" x2="600" y2="41.5"/><line x1="0" y1="75" x2="600" y2="75"/>
-                <line x1="0" y1="108.5" x2="600" y2="108.5"/><line x1="0" y1="142" x2="600" y2="142"/>
+                <line x1="${padL}" y1="41.5" x2="${W - padR}" y2="41.5"/><line x1="${padL}" y1="75" x2="${W - padR}" y2="75"/>
+                <line x1="${padL}" y1="108.5" x2="${W - padR}" y2="108.5"/><line x1="${padL}" y1="142" x2="${W - padR}" y2="142"/>
             </g>
             <text x="4" y="38" fill="var(--muted)" font-size="9">75%</text>
             <text x="4" y="72" fill="var(--muted)" font-size="9">50%</text>
             <text x="4" y="106" fill="var(--muted)" font-size="9">25%</text>
             <text x="4" y="140" fill="var(--muted)" font-size="9">0%</text>
-            <path d="${cpuL.d} L 600 150 L 0 150 Z" fill="rgba(30,215,96,.10)"/>
+            <path d="${cpuL.d} L ${W - padR} 150 L ${padL} 150 Z" fill="rgba(30,215,96,.10)"/>
             <path d="${cpuL.d}" fill="none" stroke="#1ED760" stroke-width="2" stroke-linecap="round"/>
             <path d="${memL.d}" fill="none" stroke="#4A90E2" stroke-width="2" stroke-linecap="round" opacity=".85"/>
             <circle cx="${cpuL.last[0]}" cy="${cpuL.last[1]}" r="3.5" fill="#1ED760"/>
@@ -492,16 +494,78 @@ class App {
         }).join('')}</div></div>`;
     }
 
+    /* ================= 注册授权码 ================= */
+    async loadInviteCodes() {
+        const box = document.getElementById('invite-codes-list');
+        if (!box) return;
+        try {
+            const r = await this.request('/api/admin/invite-codes');
+            const codes = (r && r.data) || [];
+            if (!codes.length) {
+                box.innerHTML = '<div class="empty-state" style="padding:12px 0">暂无授权码，生成后可用于开放注册（管理员密码仍可直接注册）。</div>';
+                return;
+            }
+            box.innerHTML = codes.map(c => {
+                const uses = c.uses || [];
+                const used = uses.length;
+                const status = c.revoked
+                    ? '<span class="badge err">已作废</span>'
+                    : used >= (c.maxUses || 1)
+                        ? '<span class="badge gray">已用完</span>'
+                        : '<span class="badge blue">未使用</span>';
+                const who = used ? ' · 使用人 ' + this.escapeHtml((uses[uses.length - 1] || {}).username || '') : '';
+                return `<div class="invite-row">
+                    <span class="invite-code">${this.escapeHtml(c.code)}</span>
+                    <span class="invite-note">${this.escapeHtml(c.note || '')}</span>
+                    <span class="invite-status">${status}</span>
+                    <span class="invite-meta">${this.formatDate(c.createdAt)}${who}</span>
+                    <span class="invite-acts"><button class="mini danger" onclick="app.revokeInvite('${this.escapeJs(c.code)}')">作废</button></span>
+                </div>`;
+            }).join('');
+        } catch (err) {
+            box.innerHTML = '<div class="empty-state">授权码加载失败</div>';
+        }
+    }
+
+    async createInviteCodes() {
+        const count = Math.min(Math.max(parseInt(document.getElementById('invite-count').value, 10) || 1, 1), 50);
+        const note = (document.getElementById('invite-note').value || '').trim();
+        try {
+            await this.request('/api/admin/invite-codes', { method: 'POST', body: JSON.stringify({ count, note }) });
+            showSuccess('授权码已生成');
+            this.loadInviteCodes();
+        } catch (e) {
+            showError('生成授权码失败');
+        }
+    }
+
+    async revokeInvite(code) {
+        if (!confirm('确认作废授权码 ' + code + '？')) return;
+        try {
+            await this.request('/api/admin/invite-codes/revoke', { method: 'POST', body: JSON.stringify({ code }) });
+            showSuccess('授权码已作废');
+            this.loadInviteCodes();
+        } catch (e) {
+            showError('作废失败');
+        }
+    }
+
     async loadUsers() {
         try {
-            const [users, pub] = await Promise.all([
+            const [users, pub, stats] = await Promise.all([
                 this.request('/api/users'),
-                this.request('/api/admin/public-library').catch(() => null)
+                this.request('/api/admin/public-library').catch(() => null),
+                this.request('/api/admin/users-stats').catch(() => null)
             ]);
             this.users = users.filter(u => u.name !== '_open');
+            this.userStatsMap = {};
+            this.userStatsTotal = { playlists: 0, albums: 0, artists: 0, songs: 0 };
+            if (stats && Array.isArray(stats.users)) stats.users.forEach(x => { this.userStatsMap[x.name] = x; });
+            if (stats && stats.total) this.userStatsTotal = stats.total;
             this.pending = (pub && pub.data && pub.data.legacy && pub.data.legacy.pendingRequests) || [];
             this.renderUsers();
             this.renderUserRequests();
+            if (this.currentView === 'user-detail') this.renderUserDetail();
         } catch (err) {
             document.getElementById('users-list').innerHTML = '<div class="empty-state">用户列表加载失败，请刷新重试</div>';
             showError('用户列表加载失败');
@@ -522,35 +586,47 @@ class App {
             const fmtB = b => b >= 1073741824 ? (b / 1073741824).toFixed(1) + ' GB' : Math.round((b || 0) / 1048576) + ' MB';
             const granted = !!user.publicLibGranted;
             const formats = Array.isArray(user.cloudFormats) && user.cloudFormats.length ? user.cloudFormats : [];
+            const roleLabel = user.role === 'owner' ? '所有者' : (user.role === 'admin' ? '管理员' : '成员');
             const cloudSub = `${fmtB(q.usedBytes || 0)} / ${q.quotaMB ? q.quotaMB + ' MB' : '默认'} · ${q.percent || 0}%`;
+            const dirText = user.enableCustomMusicDir ? this.escapeHtml(user.customMusicDir || '未设置') : '—';
+            const st = this.userStatsMap && this.userStatsMap[user.name];
+            const statLine = st ? `歌单 ${st.playlists} · 专辑 ${st.albums} · 歌手 ${st.artists} · 歌曲 ${st.songs}` : '';
+            const ava = user.avatar
+                ? `<img class="ava ava-img" src="/api/admin/avatar?user=${this.escapeJs(user.name)}&auth=${encodeURIComponent(this.password || '')}&t=${Date.now()}" alt="" onerror="this.style.display='none'">`
+                : `<span class="ava" style="background:${stringToColor(user.name)}">${this.escapeHtml(user.name.charAt(0).toUpperCase())}</span>`;
             return `
             <div class="trow users-row" data-username="${this.escapeHtml(user.name.toLowerCase())}">
-                <span><input type="checkbox" class="sel user-checkbox" data-index="${index}" aria-label="选择用户 ${this.escapeHtml(user.name)}" onchange="app.updateUserBatchBtn()"></span>
-                <span>
-                    <span class="u-name"><span class="ava" style="background:${stringToColor(user.name)}">${this.escapeHtml(user.name.charAt(0).toUpperCase())}</span><b>${this.escapeHtml(user.name)}</b>
-                    <span class="badge ${granted ? 'blue' : ''}" style="margin-left:6px">${granted ? '已授权曲库' : '未授权'}</span>
-                    ${user.enableCustomMusicDir ? '<span class="badge blue" style="margin-left:6px">自定义目录</span>' : ''}
-                    ${user.cloudDisabled ? '<span class="badge" style="margin-left:6px;color:var(--red)">已禁用上传</span>' : ''}
-                    ${formats.length ? `<span class="u-sub" style="margin-left:6px">格式:${formats.join('/')}</span>` : ''}
-                    <span class="u-sub" style="width:100%;margin-left:40px">${cloudSub}${user.password ? ' · 密码 ******' : ''}</span></span>
+                <span class="u-check"><input type="checkbox" class="sel user-checkbox" data-index="${index}" aria-label="选择用户 ${this.escapeHtml(user.name)}" onchange="app.updateUserBatchBtn()"></span>
+                <span class="u-main">
+                    <span class="u-name">
+                        ${ava}
+                        <span class="u-id"><b>${this.escapeHtml(user.name)}</b></span>
+                        <span class="u-badges">
+                            <span class="badge ${granted ? 'blue' : 'gray'}">${granted ? '已授权曲库' : '未授权'}</span>
+                            ${user.cloudDisabled ? '<span class="badge err">已禁用上传</span>' : ''}
+                            ${user.enableCustomMusicDir ? '<span class="badge blue">自定义目录</span>' : ''}
+                            ${formats.length ? `<span class="badge gray">格式 ${formats.join('/')}</span>` : ''}
+                        </span>
+                    </span>
+                    <span class="u-meta">${cloudSub}${statLine ? `<i class="u-stat">${statLine}</i>` : ''}</span>
                 </span>
-                <span class="row-acts" style="justify-content:flex-start">
-                    <button class="mini" aria-label="显示或隐藏连接密码" onclick="app.togglePasswordVisibility(${index})"><svg class="mbtn-ic" viewBox="0 0 24 24"><use href="#i-eye"/></svg></button>
-                    <button class="mini" onclick="app.showEditPasswordModal(${index})">改密</button>
-                </span>
-                <span class="col-devices"><span class="badge">已创建</span></span>
-                <span style="font-size:11px;color:var(--muted)">${user.enableCustomMusicDir ? this.escapeHtml(user.customMusicDir || '未设置') : '—'}</span>
-                <span class="row-acts">
-                    <button class="mini" onclick="app.userGrant('${this.escapeJs(user.name)}', ${!granted})">${granted ? '取消授权' : '授权曲库'}</button>
-                    <button class="mini" onclick="app.userQuotaEdit('${this.escapeJs(user.name)}')">限额</button>
-                    <button class="mini" onclick="app.userQuotaDisabled('${this.escapeJs(user.name)}', ${!user.cloudDisabled})">${user.cloudDisabled ? '恢复上传' : '禁用上传'}</button>
-                    <button class="mini" onclick="app.userFormats('${this.escapeJs(user.name)}')">格式</button>
-                    <button class="mini danger" onclick="app.userCleanup('${this.escapeJs(user.name)}')">清理</button>
-                    <button class="mini" onclick="app.showRenameUserModal(${index})">配置</button>
-                    <button class="mini danger" onclick="app.deleteUser(${index})"><svg class="mbtn-ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg> 删除</button>
+                <span class="u-role"><span class="badge gray">${roleLabel}</span></span>
+                <span class="u-dir">${dirText}</span>
+                <span class="u-acts">
+                    <button class="mini primary" onclick="app.openUserDetail('${this.escapeJs(user.name)}')">管理</button>
                 </span>
             </div>`;
         }).join('');
+        const strip = document.getElementById('users-stats-strip');
+        if (strip) {
+            const t = this.userStatsTotal || { playlists: 0, albums: 0, artists: 0, songs: 0 };
+            strip.innerHTML = `
+                <div class="ust-item"><b>${this.users.length}</b><span>注册用户</span></div>
+                <div class="ust-item"><b>${t.playlists}</b><span>歌单</span></div>
+                <div class="ust-item"><b>${t.albums}</b><span>收藏专辑</span></div>
+                <div class="ust-item"><b>${t.artists}</b><span>收藏歌手</span></div>
+                <div class="ust-item"><b>${t.songs}</b><span>歌曲总数</span></div>`;
+        }
         const selectAll = document.getElementById('select-all-users');
         if (selectAll) selectAll.checked = false;
         this.updateUserBatchBtn();
@@ -559,14 +635,227 @@ class App {
 
     filterUsers() {
         const query = document.getElementById('user-search-input').value.toLowerCase().trim();
+        let visible = 0;
         document.querySelectorAll('#users-list .users-row').forEach(row => {
-            row.style.display = (row.dataset.username || '').includes(query) ? '' : 'none';
+            const show = (row.dataset.username || '').includes(query);
+            row.style.display = show ? '' : 'none';
+            if (show) visible++;
         });
         let empty = document.getElementById('users-filter-empty');
         if (!empty) { empty = document.createElement('div'); empty.id = 'users-filter-empty'; empty.className = 'empty-state hidden'; empty.textContent = '没有匹配的用户，请尝试其他关键词'; document.getElementById('users-list').append(empty); }
-        const visible = Array.from(document.querySelectorAll('#users-list .users-row')).some(row => row.style.display !== 'none');
-        empty.classList.toggle('hidden', visible || !this.users.length);
+        empty.classList.toggle('hidden', visible > 0 || !this.users.length);
+        const sub = document.getElementById('users-subtitle');
+        if (sub) sub.textContent = query ? `匹配 ${visible} / ${this.users.length} 位用户` : `${this.users.length} 位注册用户`;
+        const clear = document.getElementById('user-search-clear');
+        if (clear) clear.classList.toggle('hidden', !query);
         this.updateUserBatchBtn();
+    }
+
+    clearUserSearch() {
+        const inp = document.getElementById('user-search-input');
+        if (inp) inp.value = '';
+        this.filterUsers();
+    }
+
+    // ── 账号内页:详情 / 配置 ──
+    openUserDetail(name) {
+        const index = this.users.findIndex(u => u.name === name);
+        if (index < 0) { showError('账号不存在'); return; }
+        this.detailIndex = index;
+        this.detailUserName = name;
+        this.detailSongQuery = { keyword: '', page: 1 };
+        this.detailSongs = null;
+        this.switchView('user-detail');
+        this.renderUserDetail();
+    }
+
+    closeUserDetail() {
+        this.switchView('users');
+    }
+
+    openDataForUser(name) {
+        const sel = document.getElementById('data-user-select');
+        if (sel) sel.value = name;
+        const label = document.querySelector('#data-user-selector .usel-label');
+        if (label) label.textContent = name;
+        this.switchView('data');
+        this.loadUserData();
+    }
+
+    renderUserDetail() {
+        const body = document.getElementById('user-detail-body');
+        if (!body) return;
+        const u = (this.users || []).find(x => x.name === this.detailUserName);
+        if (!u) { body.innerHTML = '<div class="empty-state">账号不存在或已被删除</div>'; return; }
+        const q = u.cloudQuota || {};
+        const fmtB = b => b >= 1073741824 ? (b / 1073741824).toFixed(1) + ' GB' : Math.round((b || 0) / 1048576) + ' MB';
+        const roleLabel = u.role === 'owner' ? '所有者' : (u.role === 'admin' ? '管理员' : '成员');
+        const formats = Array.isArray(u.cloudFormats) && u.cloudFormats.length ? u.cloudFormats : [];
+        const created = u.createdAt ? new Date(u.createdAt).toLocaleString('zh-CN') : '—';
+        const lastActive = u.lastActiveAt ? new Date(u.lastActiveAt).toLocaleString('zh-CN') : '—';
+        const audit = Array.isArray(u.audit) ? u.audit : [];
+        const dst = this.userStatsMap && this.userStatsMap[u.name];
+        document.getElementById('user-detail-name').textContent = u.name;
+        document.getElementById('user-detail-crumb').textContent = u.name;
+        document.getElementById('user-detail-sub').textContent = `${roleLabel} · 注册于 ${created}`;
+        body.innerHTML = `
+            <div class="glass detail-card">
+                <h3>基础信息</h3>
+                <div class="detail-grid">
+                    <div class="detail-item"><label>用户名</label><span>${this.escapeHtml(u.name)}</span></div>
+                    <div class="detail-item"><label>角色</label><span class="badge gray">${roleLabel}</span></div>
+                    <div class="detail-item"><label>注册时间</label><span>${created}</span></div>
+                    <div class="detail-item"><label>最后活跃</label><span>${lastActive}</span></div>
+                    <div class="detail-item"><label>自定义目录</label><span>${u.enableCustomMusicDir ? this.escapeHtml(u.customMusicDir || '未设置') : '—'}</span></div>
+                </div>
+                <div class="detail-row">
+                    <div><div class="detail-title">用户名与目录配置</div><div class="u-sub">修改用户名、自定义目录开关及读写权限</div></div>
+                    <button class="mini" onclick="app.showRenameUserModal(${this.detailIndex})">配置</button>
+                </div>
+            </div>
+            <div class="glass detail-card">
+                <h3>音乐数据</h3>
+                <div class="detail-grid">
+                    <div class="detail-item"><label>歌单</label><span>${dst ? dst.playlists : 0}</span></div>
+                    <div class="detail-item"><label>收藏专辑</label><span>${dst ? dst.albums : 0}</span></div>
+                    <div class="detail-item"><label>收藏歌手</label><span>${dst ? dst.artists : 0}</span></div>
+                    <div class="detail-item"><label>歌曲总数</label><span>${dst ? dst.songs : 0}</span></div>
+                </div>
+                <div class="detail-row">
+                    <div><div class="detail-title">歌单 / 专辑 / 歌手明细</div><div class="u-sub">在音乐数据视图中按账号浏览与管理曲目</div></div>
+                    <button class="mini primary" onclick="app.openDataForUser('${this.escapeJs(u.name)}')">查看数据</button>
+                </div>
+            </div>
+            <div class="glass detail-card">
+                <h3>曲库授权</h3>
+                <div class="detail-row">
+                    <div><div class="detail-title">公共曲库访问</div><div class="u-sub">授权后该账号可在客户端浏览公共曲库</div></div>
+                    <button class="mini ${u.publicLibGranted ? 'danger' : 'primary'}" onclick="app.userGrant('${this.escapeJs(u.name)}', ${!u.publicLibGranted})">${u.publicLibGranted ? '取消授权' : '授权曲库'}</button>
+                </div>
+            </div>
+            <div class="glass detail-card">
+                <h3>云曲库</h3>
+                <div class="detail-grid">
+                    <div class="detail-item"><label>曲目数量</label><span>${q.count || 0} 首</span></div>
+                    <div class="detail-item"><label>已用 / 配额</label><span>${fmtB(q.usedBytes || 0)} / ${q.quotaMB ? q.quotaMB + ' MB' : '默认'}</span></div>
+                    <div class="detail-item"><label>用量占比</label><span>${q.percent || 0}%</span></div>
+                </div>
+                <div class="quota-bar"><i style="width:${Math.min(100, q.percent || 0)}%"></i></div>
+                <div class="detail-row" style="margin-top:14px">
+                    <div><div class="detail-title">逐账号限额</div><div class="u-sub">覆盖默认配额，留空回落默认</div></div>
+                    <button class="mini" onclick="app.userQuotaEdit('${this.escapeJs(u.name)}')">设置限额</button>
+                </div>
+                <div class="detail-row">
+                    <div><div class="detail-title">上传格式白名单</div><div class="u-sub">${formats.length ? '当前: ' + formats.join('/') : '不限制格式'}</div></div>
+                    <button class="mini" onclick="app.userFormats('${this.escapeJs(u.name)}')">设置格式</button>
+                </div>
+                <div class="detail-row">
+                    <div><div class="detail-title">禁用上传</div><div class="u-sub">禁用后云端只读，拒绝新上传</div></div>
+                    <button class="mini ${u.cloudDisabled ? 'primary' : 'danger'}" onclick="app.userQuotaDisabled('${this.escapeJs(u.name)}', ${!u.cloudDisabled})">${u.cloudDisabled ? '恢复上传' : '禁用上传'}</button>
+                </div>
+                <div class="detail-row">
+                    <div><div class="detail-title">清理云曲库</div><div class="u-sub">删除该账号全部云曲库文件并重置索引，不可恢复</div></div>
+                    <button class="mini danger" onclick="app.userCleanup('${this.escapeJs(u.name)}')">清理</button>
+                </div>
+            </div>
+            <div class="glass detail-card">
+                <h3>上传曲目 <span class="u-sub" id="detail-songs-sub"></span></h3>
+                <div class="lib-two-col" style="margin-bottom:12px">
+                    <div class="cfg-btns"><input class="inp" id="detail-song-kw" placeholder="歌名 / 歌手 / 专辑 / 文件名" onkeydown="if(event.key==='Enter')app.detailSongSearch()"><button class="mini" onclick="app.detailSongSearch()">检索</button></div>
+                </div>
+                <div class="table">
+                    <div class="trow hd users-row" style="grid-template-columns:2fr 1fr 1fr 1fr auto">
+                        <span>曲目</span><span>歌手</span><span>专辑</span><span>大小</span><span style="text-align:right">操作</span>
+                    </div>
+                    <div id="detail-songs"></div>
+                </div>
+                <div class="cfg-btns" style="justify-content:space-between;margin-top:10px">
+                    <span class="u-sub" id="detail-songs-page"></span>
+                    <span class="row-acts"><button class="mini" onclick="app.detailSongPage(-1)">上一页</button><button class="mini" onclick="app.detailSongPage(1)">下一页</button></span>
+                </div>
+            </div>
+            <div class="glass detail-card">
+                <h3>安全</h3>
+                <div class="detail-row">
+                    <div><div class="detail-title">连接密码</div><div class="u-sub">修改客户端连接该账号的密码</div></div>
+                    <button class="mini" onclick="app.showEditPasswordModal(${this.detailIndex})">改密</button>
+                </div>
+            </div>
+            <div class="glass detail-card">
+                <h3>操作留痕</h3>
+                ${audit.length ? audit.map(a => `
+                    <div class="detail-row">
+                        <div><div class="detail-title">${this.escapeHtml(a.detail || a.action || '')}</div><div class="u-sub">${a.at ? new Date(a.at).toLocaleString('zh-CN') : '—'} · ${this.escapeHtml(a.action || '')}</div></div>
+                    </div>`).join('') : '<div class="empty-state">暂无留痕</div>'}
+            </div>
+            <div class="glass detail-card detail-danger">
+                <h3>危险操作</h3>
+                <div class="detail-row">
+                    <div><div class="detail-title">删除账号</div><div class="u-sub">删除后该账号无法再连接服务器</div></div>
+                    <button class="mini danger" onclick="app.deleteUser(${this.detailIndex})">删除账号</button>
+                </div>
+            </div>`;
+        this.loadDetailSongs();
+    }
+
+    async loadDetailSongs() {
+        if (this.currentView !== 'user-detail') return;
+        const q = this.detailSongQuery || (this.detailSongQuery = { keyword: '', page: 1 });
+        const params = new URLSearchParams({ username: this.detailUserName || '', page: q.page, pageSize: 20 });
+        if (q.keyword) params.set('keyword', q.keyword);
+        try {
+            const r = await this.request('/api/admin/user/songs?' + params.toString());
+            if (!r.success) throw new Error(r.message || '加载失败');
+            this.detailSongs = r.data;
+            this.renderDetailSongs();
+        } catch (e) { showError('曲目加载失败: ' + e.message); }
+    }
+
+    renderDetailSongs() {
+        const box = document.getElementById('detail-songs');
+        if (!box) return;
+        const d = this.detailSongs || { total: 0, items: [], page: 1, pageSize: 20 };
+        const fmt = b => b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+        box.innerHTML = d.items.length ? d.items.map(x => `
+            <div class="trow users-row" style="grid-template-columns:2fr 1fr 1fr 1fr auto">
+                <span><b>${this.escapeHtml(x.name)}</b><div class="u-sub">${this.escapeHtml(x.filename)}</div></span>
+                <span>${this.escapeHtml(x.singer || '')}</span>
+                <span>${this.escapeHtml(x.album || '')}</span>
+                <span>${x.size ? fmt(x.size) : '—'}${x.interval ? ` <span class="u-sub">${this.escapeHtml(x.interval)}</span>` : ''}${x.hasLyric ? ' <span class="badge gray">词</span>' : ''}</span>
+                <span class="row-acts"><button class="mini danger" onclick="app.detailSongDelete('${this.escapeJs(x.filename)}')">删除</button></span>
+            </div>`).join('') : '<div class="empty-state">无曲目</div>';
+        const pages = Math.max(1, Math.ceil(d.total / d.pageSize));
+        const sub = document.getElementById('detail-songs-sub');
+        if (sub) sub.textContent = `共 ${d.total} 首`;
+        const pg = document.getElementById('detail-songs-page');
+        if (pg) pg.textContent = `第 ${d.page} / ${pages} 页`;
+    }
+
+    detailSongSearch() {
+        const kw = document.getElementById('detail-song-kw');
+        this.detailSongQuery = this.detailSongQuery || { keyword: '', page: 1 };
+        this.detailSongQuery.keyword = kw ? kw.value.trim() : '';
+        this.detailSongQuery.page = 1;
+        this.loadDetailSongs();
+    }
+
+    detailSongPage(delta) {
+        const d = this.detailSongs || { page: 1, total: 0, pageSize: 20 };
+        const pages = Math.max(1, Math.ceil(d.total / d.pageSize));
+        const np = Math.min(pages, Math.max(1, d.page + delta));
+        if (np === d.page) return;
+        this.detailSongQuery.page = np;
+        this.loadDetailSongs();
+    }
+
+    async detailSongDelete(filename) {
+        if (!confirm('确定删除该曲目？将一并删除磁盘文件与歌词，不可恢复。')) return;
+        try {
+            const r = await this.request('/api/admin/user/song/delete', { method: 'POST', body: JSON.stringify({ username: this.detailUserName, filename }) });
+            if (!r.success) throw new Error(r.message || '删除失败');
+            showSuccess('曲目已删除');
+            await this.loadUsers();
+        } catch (e) { showError('删除失败: ' + e.message); }
     }
 
     togglePasswordVisibility(index) {
@@ -635,6 +924,7 @@ class App {
             });
             this.loadUsers();
             this.loadDashboard();
+            if (this.currentView === 'user-detail') this.closeUserDetail();
             showSuccess('用户已删除');
         } catch (err) { showError('删除用户失败: ' + err.message); }
     }
@@ -795,6 +1085,13 @@ class App {
             document.getElementById('rename-user-modal').classList.add('hidden');
             this.loadUsers();
             this.loadDashboard();
+            if (this.currentView === 'user-detail') {
+                if (newName !== this.editingUser) {
+                    this.detailUserName = newName;
+                    this.detailIndex = this.users.findIndex(x => x.name === newName);
+                }
+                this.renderUserDetail();
+            }
             showSuccess(newName !== this.editingUser ? '用户配置及名称修改成功' : '用户配置更新成功');
         } catch (err) { showError('保存失败: ' + err.message); }
     }
@@ -920,6 +1217,7 @@ class App {
                     <div class="cover" onclick="app.viewAlbumDetails(${index})" title="点击查看专辑曲目">
                         <div class="cv ${picUrl ? '' : this.coverGrad(album.name)}">
                             ${picUrl ? `<img src="${this.escapeHtml(picUrl)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : ''}
+                            <span class="cv-char">${this.escapeHtml((album.name || '?').charAt(0).toUpperCase())}</span>
                             <span class="cnt">${songCount} 首</span>
                             <span class="cvic"><svg class="ic" style="width:26px;height:26px"><use href="#i-disc"/></svg></span>
                             <div class="cv-acts"><span class="badge" style="pointer-events:none">查看曲目</span></div>
